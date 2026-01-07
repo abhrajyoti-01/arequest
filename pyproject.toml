@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arequest"
+version = "0.2.0"
+description = "Ultra-fast async HTTP client - faster than aiohttp with requests-like API"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Abhra", email = "abhraayan@gmail.com"}
+]
+maintainers = [
+    {name = "Abhra", email = "abhraayan@gmail.com"}
+]
+keywords = ["async", "http", "client", "requests", "asyncio", "aiohttp", "fast", "performance"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: AsyncIO",
+]
+
+[project.urls]
+Homepage = "https://github.com/abhrajyoti-01/arequest"
+Repository = "https://github.com/abhrajyoti-01/arequest"
+Issues = "https://github.com/abhrajyoti-01/arequest/issues"
+
+[project.optional-dependencies]
+fast = [
+    "httptools>=0.6.0",
+]
+uvloop = [
+    "uvloop>=0.17.0; platform_system != 'Windows'",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "aiohttp>=3.8.0",
+    "ruff>=0.1.0",
+]
+all = [
+    "httptools>=0.6.0",
+    "uvloop>=0.17.0; platform_system != 'Windows'",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
