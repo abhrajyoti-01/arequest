@@ -4,11 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arequest"
-version = "1.0.0"
+version = "1.0.1"
 description = "Ultra-fast async HTTP client - faster than aiohttp with requests-like API"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
+dependencies = [
+    "httptools>=0.6.0",
+    "orjson>=3.8.0",
+]
 authors = [
     {name = "Abhra", email = "abhraayan@gmail.com"}
 ]
@@ -36,9 +40,6 @@ Repository = "https://github.com/abhrajyoti-01/arequest"
 Issues = "https://github.com/abhrajyoti-01/arequest/issues"
 
 [project.optional-dependencies]
-fast = [
-    "httptools>=0.6.0",
-]
 uvloop = [
     "uvloop>=0.17.0; platform_system != 'Windows'",
 ]
@@ -49,7 +50,7 @@ dev = [
     "ruff>=0.1.0",
 ]
 all = [
-    "httptools>=0.6.0",
+
     "uvloop>=0.17.0; platform_system != 'Windows'",
 ]
 

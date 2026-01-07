@@ -41,10 +41,9 @@ arequest concurrent mode is ~10x faster than standard requests library.
 
 ```bash
 pip install arequest
-
-# For best performance, install optional dependencies:
-pip install httptools  # faster HTTP parsing
 ```
+
+Performance optimizations (httptools, orjson) are included by default for the best experience.
 
 ---
 
@@ -266,29 +265,15 @@ MIT License - see LICENSE file
 pip install arequest
 ```
 
-### With Performance Extras
+Performance optimizations (httptools for C-accelerated parsing, orjson for faster JSON) are included by default.
 
-For optimal performance, install the optional dependencies:
+### Optional: Faster Event Loop
+
+On Linux/macOS, you can optionally install uvloop for even better performance:
 
 ```bash
-# Faster HTTP parsing (C extension) - Recommended
-pip install arequest[fast]
-
-# Faster event loop on Linux/macOS
+# Faster event loop on Linux/macOS (optional)
 pip install arequest[uvloop]
-
-# Install all performance extras
-pip install arequest[all]
-```
-
-Or install dependencies manually:
-
-```bash
-# Faster HTTP parsing (C extension)
-pip install httptools
-
-# Faster event loop on Linux/macOS
-pip install uvloop
 ```
 
 ### Development Installation
@@ -312,7 +297,8 @@ ruff check src/
 
 - Python 3.9 or higher
 - asyncio (included in Python 3.7+)
-- Optional: httptools (for C-accelerated parsing)
+- httptools (included) - C-accelerated HTTP parsing
+- orjson (included) - faster JSON operations
 - Optional: uvloop (for faster event loop on Linux/macOS)
 
 ---
@@ -1180,11 +1166,10 @@ All request methods accept the following parameters:
 
 1. **Reuse Sessions**: Always use [`Session`](docs/client.md#session) for multiple requests to benefit from connection pooling
 2. **Concurrent Requests**: Use [`bulk_get()`](docs/client.md#bulk_geturls-kwargs) or [`gather()`](docs/client.md#gatherrequests-kwargs) instead of sequential requests
-3. **Install httptools**: Get 2-5x faster parsing with `pip install httptools`
-4. **Use uvloop**: On Linux/macOS, install `uvloop` for better event loop performance
-5. **Adjust Connection Limits**: Tune `connector_limit` and `connector_limit_per_host` for your use case
-6. **Enable Keep-Alive**: Connections are kept alive by default for better performance
-7. **Use Appropriate Timeouts**: Set timeouts to prevent hanging on slow responses
+3. **Use uvloop**: On Linux/macOS, install `uvloop` for even better event loop performance
+4. **Adjust Connection Limits**: Tune `connector_limit` and `connector_limit_per_host` for your use case
+5. **Enable Keep-Alive**: Connections are kept alive by default for better performance
+6. **Use Appropriate Timeouts**: Set timeouts to prevent hanging on slow responses
 
 ---
 
