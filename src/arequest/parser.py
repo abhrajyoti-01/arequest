@@ -94,10 +94,14 @@ class FastHTTPParser:
         """Parse using httptools C extension with optimized buffer handling."""
         parser = httptools.HttpResponseParser(self)
         
-        # Optimized read loop with larger buffer for better performance
-        # 128KB buffer significantly reduces system calls
+        # Read first chunk - typically contains headers + part of body
+        data = await reader.read(65536)  # 64KB initial read
+        if data:
+            parser.feed_data(data)
+        
+        # Continue reading if message not complete
         while not self._message_complete:
-            data = await reader.read(131072)  # 128KB buffer
+            data = await reader.read(262144)  # 256KB buffer for body
             if not data:
                 break
             parser.feed_data(data)

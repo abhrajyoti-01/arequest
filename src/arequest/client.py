@@ -25,8 +25,10 @@ Example:
 """
 
 import asyncio
+import socket
 import ssl
 import time
+import zlib
 from typing import TYPE_CHECKING, Any, Optional, Union
 from urllib.parse import urlencode, urlparse
 
@@ -39,6 +41,21 @@ try:
     _HAS_FAST_PARSER = True
 except ImportError:
     _HAS_FAST_PARSER = False
+
+
+def _decompress(body: bytes, encoding: str) -> bytes:
+    """Decompress response body based on Content-Encoding."""
+    if not body:
+        return body
+    encoding = encoding.lower()
+    if encoding == 'gzip':
+        return zlib.decompress(body, zlib.MAX_WBITS | 16)
+    elif encoding == 'deflate':
+        try:
+            return zlib.decompress(body)
+        except zlib.error:
+            return zlib.decompress(body, -zlib.MAX_WBITS)
+    return body
 
 
 class Response:
@@ -172,12 +189,12 @@ class TimeoutError(Exception):
 
 
 class _ConnectionPool:
-    """High-performance connection pool for a single host."""
+    """Ultra high-performance connection pool for a single host."""
     
     __slots__ = (
         'host', 'port', 'ssl_context', 'max_size', 'max_idle_time',
         '_available', '_in_use', '_closed', '_dns_cache',
-        '_dns_expire', '_creating'
+        '_dns_expire', '_creating', '_host_bytes'
     )
     
     def __init__(
@@ -186,7 +203,7 @@ class _ConnectionPool:
         port: int,
         ssl_context: Optional[ssl.SSLContext] = None,
         max_size: int = 100,
-        max_idle_time: float = 30.0,
+        max_idle_time: float = 60.0,  # Increased for better reuse
     ):
         self.host = host
         self.port = port
@@ -200,9 +217,10 @@ class _ConnectionPool:
         self._dns_cache: Optional[list[tuple]] = None
         self._dns_expire: float = 0
         self._creating: int = 0
+        self._host_bytes = host.encode('ascii')  # Pre-encode for speed
     
     async def _resolve_dns(self) -> list[tuple]:
-        """Resolve and cache DNS."""
+        """Resolve and cache DNS with longer TTL."""
         now = time.monotonic()
         if self._dns_cache and self._dns_expire > now:
             return self._dns_cache
@@ -214,28 +232,26 @@ class _ConnectionPool:
             proto=6,  # IPPROTO_TCP
         )
         self._dns_cache = infos
-        self._dns_expire = now + 60.0
+        self._dns_expire = now + 300.0  # 5 minute DNS cache
         return infos
     
     async def acquire(self, timeout: Optional[float] = None) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Get a connection from pool or create new one with optimized logic."""
+        """Get a connection from pool with optimized fast path."""
         if self._closed:
             raise RuntimeError("Pool is closed")
         
         now = time.monotonic()
-        # Optimize: iterate in reverse for LRU-like behavior (newer connections first)
+        # Fast path: pop from end (most recently used, likely still valid)
         while self._available:
+            reader, writer, created = self._available.pop()
+            if not writer.is_closing() and (now - created) <= self.max_idle_time:
+                self._in_use.add(writer)
+                return reader, writer
+            # Silently discard stale connection
             try:
-                reader, writer, created = self._available.pop(0)
-                # Fast path: check if connection is still valid
-                if not writer.is_closing() and (now - created) <= self.max_idle_time:
-                    self._in_use.add(writer)
-                    return reader, writer
-                # Close stale connection
-                if not writer.is_closing():
-                    writer.close()
-            except IndexError:
-                break
+                writer.close()
+            except Exception:
+                pass
         
         try:
             self._creating += 1
@@ -267,18 +283,14 @@ class _ConnectionPool:
                     server_hostname=self.host if self.ssl_context else None,
                 )
                 
-                # Optimize socket for low latency
+                # Optimize socket for low latency and high throughput
                 sock = writer.get_extra_info('socket')
                 if sock:
                     try:
-                        import socket
-                        # Disable Nagle's algorithm for lower latency
                         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                        # Enable TCP keepalive for connection health
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                        # Set larger socket buffers for better throughput
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)  # 256KB
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 262144)  # 256KB
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 524288)  # 512KB
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)  # 128KB
                     except (OSError, AttributeError):
                         pass
                 
@@ -422,9 +434,14 @@ class _SimpleHTTPBuilder:
 
 
 class Session:
-    """High-performance HTTP session with full requests.Session API compatibility.
+    """Ultra high-performance HTTP session optimized for web scraping.
     
-    Drop-in async replacement for requests.Session with connection pooling and optimizations.
+    Drop-in async replacement for requests.Session with aggressive optimizations:
+    - Connection pooling with keep-alive
+    - DNS caching (5 minute TTL)
+    - Pre-cached SSL contexts
+    - Automatic cookie handling
+    - Zero-copy header building
     
     Example:
         # Async usage (recommended for performance)
@@ -443,19 +460,23 @@ class Session:
         '_closed', '_connector_limit', '_connector_limit_per_host',
         '_parser_class', '_builder_class', 'auth', 'cookies', 'verify',
         'proxies', 'hooks', 'params', 'stream', 'cert', 'max_redirects',
-        'trust_env'
+        'trust_env', '_host_header_cache', '_cookie_cache', '_cookie_cache_valid'
     )
+    
+    # Pre-create SSL contexts at class level for sharing across sessions
+    _SHARED_SSL_VERIFIED: Optional[ssl.SSLContext] = None
+    _SHARED_SSL_UNVERIFIED: Optional[ssl.SSLContext] = None
     
     def __init__(
         self,
         headers: Optional[dict[str, str]] = None,
         timeout: Optional[float] = None,
         connector_limit: int = 100,
-        connector_limit_per_host: int = 30,
+        connector_limit_per_host: int = 50,  # Increased for web scraping
         auth: "Optional[AuthBase]" = None,
         verify: bool = True,
     ):
-        """Initialize session with optimized defaults (requests-compatible API).
+        """Initialize session with optimized defaults for web scraping.
         
         Args:
             headers: Default headers for all requests
@@ -466,7 +487,6 @@ class Session:
             verify: SSL verification (default True)
         """
         self._pools: dict[tuple[str, int, bool], _ConnectionPool] = {}
-        # Use empty dict as default for better performance
         self._default_headers = headers.copy() if headers else {}
         self._default_timeout = timeout
         self._ssl_contexts: dict[bool, ssl.SSLContext] = {}
@@ -476,6 +496,11 @@ class Session:
         self.auth = auth
         self.cookies: dict[str, str] = {}
         self.verify = verify
+        
+        # Caches for speed
+        self._host_header_cache: dict[tuple[str, int], str] = {}
+        self._cookie_cache: str = ""
+        self._cookie_cache_valid: bool = False
         
         # Additional requests-compatible attributes
         self.proxies: dict[str, str] = {}
@@ -503,28 +528,60 @@ class Session:
         """Set default headers (requests-compatible property)."""
         self._default_headers = value.copy() if value else {}
     
-    def _get_ssl_context(self, verify: bool = True) -> Optional[ssl.SSLContext]:
-        """Get cached SSL context."""
-        if verify not in self._ssl_contexts:
-            if verify:
+    @classmethod
+    def _get_shared_ssl_context(cls, verify: bool = True) -> ssl.SSLContext:
+        """Get shared SSL context (created once, shared across all sessions)."""
+        if verify:
+            if cls._SHARED_SSL_VERIFIED is None:
                 ctx = ssl.create_default_context()
-            else:
+                # Optimize SSL settings
+                ctx.check_hostname = True
+                ctx.verify_mode = ssl.CERT_REQUIRED
+                cls._SHARED_SSL_VERIFIED = ctx
+            return cls._SHARED_SSL_VERIFIED
+        else:
+            if cls._SHARED_SSL_UNVERIFIED is None:
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
-            self._ssl_contexts[verify] = ctx
-        return self._ssl_contexts[verify]
+                cls._SHARED_SSL_UNVERIFIED = ctx
+            return cls._SHARED_SSL_UNVERIFIED
+    
+    def _get_ssl_context(self, verify: bool = True) -> ssl.SSLContext:
+        """Get SSL context (uses shared context for speed)."""
+        return self._get_shared_ssl_context(verify)
     
     def _extract_cookies(self, set_cookies: list[str]) -> None:
         """Extract and store cookies from Set-Cookie headers."""
+        if not set_cookies:
+            return
         for cookie_str in set_cookies:
             # Parse cookie - extract name=value before any ;
-            parts = cookie_str.split(';')[0].strip()
-            if '=' in parts:
-                name, val = parts.split('=', 1)
-                self.cookies[name.strip()] = val.strip()
+            idx = cookie_str.find(';')
+            parts = cookie_str[:idx] if idx > 0 else cookie_str
+            eq_idx = parts.find('=')
+            if eq_idx > 0:
+                name = parts[:eq_idx].strip()
+                val = parts[eq_idx+1:].strip()
+                self.cookies[name] = val
+        self._cookie_cache_valid = False  # Invalidate cookie cache
+    
+    def _get_cookie_header(self) -> str:
+        """Get cached cookie header string."""
+        if not self._cookie_cache_valid and self.cookies:
+            self._cookie_cache = '; '.join(f'{k}={v}' for k, v in self.cookies.items())
+            self._cookie_cache_valid = True
+        return self._cookie_cache
+    
+    def _get_host_header(self, host: str, port: int) -> str:
+        """Get cached Host header value."""
+        key = (host, port)
+        if key not in self._host_header_cache:
+            self._host_header_cache[key] = host if port in (80, 443) else f"{host}:{port}"
+        return self._host_header_cache[key]
     
     def _get_pool(self, host: str, port: int, is_ssl: bool, verify: bool = True) -> _ConnectionPool:
+        """Get or create connection pool for host."""
         """Get or create connection pool for host."""
         key = (host, port, is_ssl)
         if key not in self._pools:
@@ -575,54 +632,56 @@ class Session:
         
         start_time = time.perf_counter()
         
+        # Fast URL parsing
         parsed = urlparse(url)
         scheme = parsed.scheme
         host = parsed.hostname or ''
         port = parsed.port or (443 if scheme == 'https' else 80)
         path = parsed.path or '/'
         if parsed.query:
-            path += '?' + parsed.query
+            path = f"{path}?{parsed.query}"
         
         if params:
             sep = '&' if '?' in path else '?'
-            path += sep + urlencode(params)
+            path = f"{path}{sep}{urlencode(params)}"
         
         is_ssl = scheme == 'https'
         verify_ssl = verify if verify is not None else self.verify
         
-        # Optimize header merging - start with defaults and only update if needed
+        # Optimize header merging
         if headers:
             req_headers = {**self._default_headers, **headers}
         else:
-            req_headers = self._default_headers.copy()
+            req_headers = self._default_headers.copy() if self._default_headers else {}
         
-        # Set required headers only if not present (optimized checks)
+        # Set required headers only if not present (use cached values)
         if 'Host' not in req_headers:
-            req_headers['Host'] = host if port in (80, 443) else f"{host}:{port}"
+            req_headers['Host'] = self._get_host_header(host, port)
         if 'Connection' not in req_headers:
             req_headers['Connection'] = 'keep-alive'
         if 'Accept' not in req_headers:
             req_headers['Accept'] = '*/*'
         if 'Accept-Encoding' not in req_headers:
-            req_headers['Accept-Encoding'] = 'identity'
+            req_headers['Accept-Encoding'] = 'gzip, deflate'  # Accept compression
         if 'User-Agent' not in req_headers:
-            req_headers['User-Agent'] = 'arequest/1.0.3'
+            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.4)'
         
-        # Add cookies to request (like requests.Session)
+        # Add cookies to request (use cached cookie string)
         if self.cookies and 'Cookie' not in req_headers:
-            cookie_str = '; '.join(f'{k}={v}' for k, v in self.cookies.items())
+            cookie_str = self._get_cookie_header()
             if cookie_str:
                 req_headers['Cookie'] = cookie_str
         
+        # Apply authentication
         request_auth = auth or self.auth
         if request_auth and hasattr(request_auth, 'apply'):
             class _TempReq:
                 headers = req_headers
             request_auth.apply(_TempReq())
         
+        # Build request body
         body: Optional[bytes] = None
         if json is not None:
-            # Use orjson if available for faster JSON encoding, fallback to standard json
             try:
                 import orjson
                 body = orjson.dumps(json)
@@ -659,16 +718,25 @@ class Session:
             
             elapsed = time.perf_counter() - start_time
             
+            # Decompress response body if needed
+            body = parser.body
+            content_encoding = parser.headers.get('Content-Encoding', '')
+            if content_encoding:
+                try:
+                    body = _decompress(body, content_encoding)
+                except Exception:
+                    pass  # Use original body if decompression fails
+            
             response = Response(
                 status_code=parser.status_code,
                 headers=parser.headers,
-                body=parser.body,
+                body=body,
                 url=url,
                 reason=parser.reason,
                 elapsed=elapsed,
             )
             
-            # Store cookies from Set-Cookie headers (like requests.Session)
+            # Store cookies from Set-Cookie headers
             self._extract_cookies(parser.set_cookies)
             
             pool.release(reader, writer, keep_alive=parser.keep_alive)
@@ -815,49 +883,53 @@ class Session:
 
 
 # Convenience functions for simple one-off requests
+# Global session for connection reuse across one-off requests (major speed boost)
+_global_session: Optional['Session'] = None
+
+
+def _get_global_session() -> 'Session':
+    """Get or create global session for connection reuse."""
+    global _global_session
+    if _global_session is None or _global_session._closed:
+        _global_session = Session()
+    return _global_session
+
+
 async def request(method: str, url: str, **kwargs) -> Response:
-    """Make an HTTP request."""
-    async with Session() as session:
-        return await session.request(method, url, **kwargs)
+    """Make an HTTP request using global session for connection reuse."""
+    return await _get_global_session().request(method, url, **kwargs)
 
 
 async def get(url: str, **kwargs) -> Response:
     """Make GET request."""
-    async with Session() as session:
-        return await session.get(url, **kwargs)
+    return await _get_global_session().get(url, **kwargs)
 
 
 async def post(url: str, **kwargs) -> Response:
     """Make POST request."""
-    async with Session() as session:
-        return await session.post(url, **kwargs)
+    return await _get_global_session().post(url, **kwargs)
 
 
 async def put(url: str, **kwargs) -> Response:
     """Make PUT request."""
-    async with Session() as session:
-        return await session.put(url, **kwargs)
+    return await _get_global_session().put(url, **kwargs)
 
 
 async def delete(url: str, **kwargs) -> Response:
     """Make DELETE request."""
-    async with Session() as session:
-        return await session.delete(url, **kwargs)
+    return await _get_global_session().delete(url, **kwargs)
 
 
 async def patch(url: str, **kwargs) -> Response:
     """Make PATCH request."""
-    async with Session() as session:
-        return await session.patch(url, **kwargs)
+    return await _get_global_session().patch(url, **kwargs)
 
 
 async def head(url: str, **kwargs) -> Response:
     """Make HEAD request."""
-    async with Session() as session:
-        return await session.head(url, **kwargs)
+    return await _get_global_session().head(url, **kwargs)
 
 
 async def options(url: str, **kwargs) -> Response:
     """Make OPTIONS request."""
-    async with Session() as session:
-        return await session.options(url, **kwargs)
+    return await _get_global_session().options(url, **kwargs)

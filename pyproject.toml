@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arequest"
-version = "1.0.3"
-description = "Ultra-fast async HTTP client - faster than aiohttp with requests-like API"
+version = "1.0.4"
+description = "Ultra-fast async HTTP client for web scraping - faster than aiohttp with requests-like API"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
