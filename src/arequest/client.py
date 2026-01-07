@@ -774,6 +774,20 @@ class Session:
     
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.close()
+    
+    def __del__(self) -> None:
+        """Cleanup on deletion if session wasn't properly closed."""
+        if not self._closed and self._pools:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule cleanup
+                    loop.create_task(self.close())
+                else:
+                    loop.run_until_complete(self.close())
+            except Exception:
+                # Best effort cleanup - ignore errors during shutdown
+                pass
 
 
 # Convenience functions for simple one-off requests
