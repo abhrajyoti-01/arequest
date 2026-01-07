@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arequest"
-version = "0.2.0"
+version = "1.0.0"
 description = "Ultra-fast async HTTP client - faster than aiohttp with requests-like API"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -19,7 +19,6 @@ keywords = ["async", "http", "client", "requests", "asyncio", "aiohttp", "fast",
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

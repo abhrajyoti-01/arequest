@@ -1,66 +1,215 @@
 # arequest
 
-<div align="center">
-
-**High-performance async HTTP client - Drop-in replacement for requests with 10x speed**
+**High-performance async HTTP client for Python**
 
 [![PyPI version](https://badge.fury.io/py/arequest.svg)](https://badge.fury.io/py/arequest)
 [![Python versions](https://img.shields.io/pypi/pyversions/arequest.svg)](https://pypi.org/project/arequest/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-
-[Documentation](https://github.com/abhrajyoti-01/arequest/blob/main/docs/index.md) |
-[API Reference](https://github.com/abhrajyoti-01/arequest/blob/main/docs/api.md) |
-[Migration Guide](https://github.com/abhrajyoti-01/arequest/blob/main/MIGRATION.md) |
-[Examples](#examples)
-
-</div>
 
 ---
 
 ## Overview
 
-**arequest** is an ultra-fast asynchronous HTTP client that provides a **100% requests-compatible API** with **10x better performance**. Drop-in async replacement for the popular `requests` library with connection pooling, optimized parsing, and true concurrent request handling.
+**arequest** is a fast asynchronous HTTP client that works like `requests` but uses Python's async/await. It's designed for speed with connection pooling, optimized parsing, and concurrent request handling.
 
-### Why Choose arequest?
+### Key Features
 
-- 🚀 **10x Faster**: 24+ req/s vs 2.3 req/s with requests library
-- 🔄 **100% Compatible**: Same API as requests - just add `await`
-- ⚡ **True Concurrency**: Handle hundreds of concurrent requests effortlessly
-- 🎯 **Zero Learning Curve**: If you know `requests`, you know `arequest`
-- 🛡️ **Production Ready**: Battle-tested with comprehensive error handling
-- 📦 **Optimized**: C-accelerated parsing, connection pooling, zero-copy buffers
-- 🎨 **Type Safe**: Full type annotations for excellent IDE support
+- 🚀 Fast async I/O with connection pooling
+- 🔄 Requests-compatible API - familiar and easy to use
+- ⚡ Handle hundreds of concurrent requests
+- 📦 Optional C-accelerated parsing with httptools
+- 🎨 Full type hints throughout
 
 ---
 
 ## Performance
 
-arequest delivers **10x better performance** than the requests library through async I/O and optimized implementations.
+Real-world benchmark (50 requests to httpbin.org):
 
-### Real-World Benchmark Results
+| Library | Mode | Requests/sec |
+|---------|------|--------------|
+| **arequest** | concurrent | **24.10** |
+| arequest | sequential | 2.30 |
+| requests | with session | 2.28 |
+| aiohttp | concurrent | 24.24 |
 
-Performance test against requests library (50 requests to httpbin.org):
+arequest concurrent mode is ~10x faster than standard requests library.
 
-| Library | Mode | Requests/sec | vs requests |
-|---------|------|--------------|-------------|
-| **arequest** | concurrent | **24.10** | **10.59x faster** 🔥 |
-| **arequest** | sequential | **2.30** | **1.01x faster** |
-| requests | with session | 2.28 | baseline |
-| requests | no session | 0.72 | 3.2x slower |
+---
 
-**Key Takeaway**: arequest concurrent mode is **10x faster** than standard requests!
+## Installation
 
-### vs aiohttp Benchmark
+```bash
+pip install arequest
 
-Comparison with aiohttp (50 concurrent requests):
+# For best performance, install optional dependencies:
+pip install httptools  # faster HTTP parsing
+```
 
-| Library | Requests/sec | Performance |
-|---------|--------------|-------------|
-| **arequest** | **27.63** | **Fastest** 🏆 |
-| aiohttp | 24.24 | 114% of aiohttp |
+---
 
-### Performance Optimizations
+## Quick Start
+
+### Simple Request
+
+```python
+import asyncio
+import arequest
+
+async def main():
+    response = await arequest.get("https://httpbin.org/get")
+    print(response.json())
+
+asyncio.run(main())
+```
+
+### Using Sessions (Recommended)
+
+```python
+import asyncio
+import arequest
+
+async def main():
+    async with arequest.Session() as session:
+        response = await session.get("https://httpbin.org/get")
+        print(response.status_code)
+        print(response.text)
+
+asyncio.run(main())
+```
+
+### Concurrent Requests
+
+```python
+import asyncio
+import arequest
+
+async def main():
+    async with arequest.Session() as session:
+        # Make 100 requests concurrently
+        urls = [f"https://httpbin.org/get?i={i}" for i in range(100)]
+        responses = await session.bulk_get(urls)
+        
+        for response in responses:
+            print(f"Status: {response.status_code}")
+
+asyncio.run(main())
+```
+
+---
+
+## Usage Examples
+
+### POST with JSON
+
+```python
+async def main():
+    data = {'name': 'Alice', 'email': 'alice@example.com'}
+    response = await arequest.post('https://httpbin.org/post', json=data)
+    print(response.json())
+```
+
+### Custom Headers
+
+```python
+async def main():
+    headers = {'Authorization': 'Bearer token123'}
+    response = await arequest.get('https://api.example.com', headers=headers)
+```
+
+### Query Parameters
+
+```python
+async def main():
+    params = {'page': 1, 'limit': 100}
+    response = await arequest.get('https://api.example.com', params=params)
+```
+
+### Error Handling
+
+```python
+async def main():
+    try:
+        response = await arequest.get('https://httpbin.org/status/404')
+        response.raise_for_status()
+    except arequest.ClientError as e:
+        print(f"Error: {e}")
+```
+
+### Authentication
+
+```python
+from arequest import BasicAuth
+
+async def main():
+    auth = BasicAuth('username', 'password')
+    response = await arequest.get('https://httpbin.org/basic-auth/username/password', auth=auth)
+```
+
+---
+
+## API Reference
+
+### Response Object
+
+```python
+response.status_code    # HTTP status code
+response.headers        # Response headers dict
+response.url           # Final URL
+response.content       # Raw bytes
+response.text          # Decoded text
+response.json()        # Parse JSON
+response.ok            # True if status < 400
+response.raise_for_status()  # Raise on error
+```
+
+### Session Options
+
+```python
+session = arequest.Session(
+    headers={'User-Agent': 'MyApp/1.0'},
+    timeout=30.0,
+    verify=True
+)
+```
+
+### Request Methods
+
+All standard HTTP methods are supported:
+- `get(url, **kwargs)`
+- `post(url, **kwargs)`
+- `put(url, **kwargs)`
+- `delete(url, **kwargs)`
+- `patch(url, **kwargs)`
+- `head(url, **kwargs)`
+- `options(url, **kwargs)`
+
+---
+
+## Performance Tips
+
+1. Use `Session` for multiple requests to reuse connections
+2. Use concurrent requests with `asyncio.gather()` or `bulk_get()`
+3. Install `httptools` for faster parsing: `pip install httptools`
+
+---
+
+## Requirements
+
+- Python 3.9+
+- Optional: httptools for faster parsing
+
+---
+
+## License
+
+MIT License - see LICENSE file
+
+---
+
+## Author
+
+**Abhra** - [@abhrajyoti-01](https://github.com/abhrajyoti-01)
 
 - **Connection Pooling**: Reuse connections across multiple requests
 - **DNS Caching**: 60-second TTL reduces DNS lookup overhead
