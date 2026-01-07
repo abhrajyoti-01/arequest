@@ -25,9 +25,11 @@ Example:
 """
 
 import asyncio
+import os
 import socket
 import ssl
 import time
+import uuid
 import zlib
 from typing import TYPE_CHECKING, Any, Optional, Union
 from urllib.parse import urlencode, urlparse
@@ -56,6 +58,116 @@ def _decompress(body: bytes, encoding: str) -> bytes:
         except zlib.error:
             return zlib.decompress(body, -zlib.MAX_WBITS)
     return body
+
+
+def _build_multipart_formdata(
+    data: Optional[dict] = None,
+    files: Optional[dict] = None,
+) -> tuple[bytes, str]:
+    """Build multipart/form-data body like requests library.
+    
+    Args:
+        data: Form fields as dict
+        files: Files dict. Values can be:
+            - tuple: (filename, content, content_type) or (filename, content)
+            - bytes: raw file content
+            - str: file path to read
+            - file-like object with read() method
+    
+    Returns:
+        Tuple of (body bytes, content-type header with boundary)
+    """
+    boundary = uuid.uuid4().hex
+    parts = []
+    
+    # Add form fields
+    if data:
+        for name, value in data.items():
+            if value is None:
+                continue
+            part = f'--{boundary}\r\n'
+            part += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            part += f'{value}\r\n'
+            parts.append(part.encode('utf-8'))
+    
+    # Add files
+    if files:
+        for field_name, file_info in files.items():
+            filename = field_name
+            content: bytes = b''
+            content_type = 'application/octet-stream'
+            
+            if isinstance(file_info, tuple):
+                if len(file_info) >= 2:
+                    filename = file_info[0] or field_name
+                    file_content = file_info[1]
+                    if isinstance(file_content, bytes):
+                        content = file_content
+                    elif isinstance(file_content, str):
+                        content = file_content.encode('utf-8')
+                    elif hasattr(file_content, 'read'):
+                        content = file_content.read()
+                        if isinstance(content, str):
+                            content = content.encode('utf-8')
+                if len(file_info) >= 3:
+                    content_type = file_info[2]
+            elif isinstance(file_info, bytes):
+                content = file_info
+            elif isinstance(file_info, str):
+                # It's a file path
+                if os.path.isfile(file_info):
+                    with open(file_info, 'rb') as f:
+                        content = f.read()
+                    filename = os.path.basename(file_info)
+                else:
+                    content = file_info.encode('utf-8')
+            elif hasattr(file_info, 'read'):
+                content = file_info.read()
+                if isinstance(content, str):
+                    content = content.encode('utf-8')
+                if hasattr(file_info, 'name'):
+                    filename = os.path.basename(file_info.name)
+            
+            # Detect content type from filename
+            if content_type == 'application/octet-stream':
+                ext = os.path.splitext(filename)[1].lower()
+                content_types = {
+                    '.txt': 'text/plain',
+                    '.html': 'text/html',
+                    '.htm': 'text/html',
+                    '.css': 'text/css',
+                    '.js': 'application/javascript',
+                    '.json': 'application/json',
+                    '.xml': 'application/xml',
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.png': 'image/png',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp',
+                    '.svg': 'image/svg+xml',
+                    '.pdf': 'application/pdf',
+                    '.zip': 'application/zip',
+                    '.gz': 'application/gzip',
+                    '.mp3': 'audio/mpeg',
+                    '.mp4': 'video/mp4',
+                    '.webm': 'video/webm',
+                }
+                content_type = content_types.get(ext, 'application/octet-stream')
+            
+            part = f'--{boundary}\r\n'.encode('utf-8')
+            part += f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode('utf-8')
+            part += f'Content-Type: {content_type}\r\n\r\n'.encode('utf-8')
+            part += content
+            part += b'\r\n'
+            parts.append(part)
+    
+    # Closing boundary
+    parts.append(f'--{boundary}--\r\n'.encode('utf-8'))
+    
+    body = b''.join(parts)
+    content_type_header = f'multipart/form-data; boundary={boundary}'
+    
+    return body, content_type_header
 
 
 class Response:
@@ -603,6 +715,7 @@ class Session:
         params: Optional[dict[str, Any]] = None,
         data: Optional[Union[bytes, str, dict]] = None,
         json: Optional[Any] = None,
+        files: Optional[dict] = None,
         timeout: Optional[float] = None,
         verify: Optional[bool] = None,
         allow_redirects: bool = True,
@@ -618,6 +731,11 @@ class Session:
             params: Query parameters
             data: Form data or raw body
             json: JSON body (auto-serialized)
+            files: Files for multipart upload. Values can be:
+                   - tuple: (filename, content, content_type)
+                   - bytes: raw file content
+                   - str: file path
+                   - file-like object
             timeout: Request timeout
             verify: SSL verification
             allow_redirects: Follow redirects
@@ -664,7 +782,7 @@ class Session:
         if 'Accept-Encoding' not in req_headers:
             req_headers['Accept-Encoding'] = 'gzip, deflate'  # Accept compression
         if 'User-Agent' not in req_headers:
-            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.4)'
+            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.5)'
         
         # Add cookies to request (use cached cookie string)
         if self.cookies and 'Cookie' not in req_headers:
@@ -679,27 +797,45 @@ class Session:
                 headers = req_headers
             request_auth.apply(_TempReq())
         
-        # Build request body
+        # Build request body with automatic Content-Type like requests library
         body: Optional[bytes] = None
-        if json is not None:
+        
+        # Priority: files > json > data (same as requests)
+        if files is not None:
+            # multipart/form-data for file uploads
+            body, content_type = _build_multipart_formdata(data if isinstance(data, dict) else None, files)
+            if 'Content-Type' not in req_headers:
+                req_headers['Content-Type'] = content_type
+        elif json is not None:
+            # application/json
             try:
                 import orjson
                 body = orjson.dumps(json)
             except ImportError:
                 import json as json_module
                 body = json_module.dumps(json, separators=(',', ':')).encode('utf-8')
-            req_headers['Content-Type'] = 'application/json'
+            if 'Content-Type' not in req_headers:
+                req_headers['Content-Type'] = 'application/json'
         elif data is not None:
             if isinstance(data, dict):
+                # application/x-www-form-urlencoded for dict data
                 body = urlencode(data).encode('utf-8')
-                req_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                if 'Content-Type' not in req_headers:
+                    req_headers['Content-Type'] = 'application/x-www-form-urlencoded'
             elif isinstance(data, str):
                 body = data.encode('utf-8')
+                # For raw string, set text/plain if no Content-Type
+                if 'Content-Type' not in req_headers:
+                    req_headers['Content-Type'] = 'text/plain; charset=utf-8'
             else:
+                # Raw bytes - user should set their own Content-Type
                 body = data
         
         if body:
             req_headers['Content-Length'] = str(len(body))
+            # Auto-set Origin for POST/PUT/PATCH if not present (common for web scraping)
+            if method.upper() in ('POST', 'PUT', 'PATCH') and 'Origin' not in req_headers:
+                req_headers['Origin'] = f"{scheme}://{host}" if port in (80, 443) else f"{scheme}://{host}:{port}"
         
         request_bytes = self._builder_class.build(method.upper(), path, req_headers, body)
         
