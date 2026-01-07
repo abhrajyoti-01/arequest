@@ -326,7 +326,7 @@ class _ConnectionPool:
 class _SimpleHTTPParser:
     """Minimal HTTP response parser with optimizations (fallback when httptools not available)."""
     
-    __slots__ = ('status_code', 'reason', 'headers', 'body', 'keep_alive', '_content_length', '_chunked')
+    __slots__ = ('status_code', 'reason', 'headers', 'body', 'keep_alive', '_content_length', '_chunked', 'set_cookies')
     
     def __init__(self):
         self.status_code = 0
@@ -336,6 +336,7 @@ class _SimpleHTTPParser:
         self.keep_alive = True
         self._content_length = None
         self._chunked = False
+        self.set_cookies: list[str] = []  # Store all Set-Cookie headers
     
     async def parse(self, reader: asyncio.StreamReader) -> None:
         header_bytes = await reader.readuntil(b'\r\n\r\n')
@@ -350,6 +351,7 @@ class _SimpleHTTPParser:
         content_length_key = b'content-length'
         transfer_encoding_key = b'transfer-encoding'
         connection_key = b'connection'
+        set_cookie_key = b'set-cookie'
         
         for line in header_bytes[status_end+2:-4].split(b'\r\n'):
             if not line:
@@ -358,9 +360,13 @@ class _SimpleHTTPParser:
             if colon > 0:
                 key = line[:colon].decode('latin-1')
                 value = line[colon+1:].strip().decode('latin-1')
-                self.headers[key] = value
                 
                 kl_bytes = line[:colon].lower()
+                if kl_bytes == set_cookie_key:
+                    self.set_cookies.append(value)
+                else:
+                    self.headers[key] = value
+                
                 if kl_bytes == content_length_key:
                     self._content_length = int(value)
                 elif kl_bytes == transfer_encoding_key:
@@ -509,6 +515,15 @@ class Session:
             self._ssl_contexts[verify] = ctx
         return self._ssl_contexts[verify]
     
+    def _extract_cookies(self, set_cookies: list[str]) -> None:
+        """Extract and store cookies from Set-Cookie headers."""
+        for cookie_str in set_cookies:
+            # Parse cookie - extract name=value before any ;
+            parts = cookie_str.split(';')[0].strip()
+            if '=' in parts:
+                name, val = parts.split('=', 1)
+                self.cookies[name.strip()] = val.strip()
+    
     def _get_pool(self, host: str, port: int, is_ssl: bool, verify: bool = True) -> _ConnectionPool:
         """Get or create connection pool for host."""
         key = (host, port, is_ssl)
@@ -591,7 +606,13 @@ class Session:
         if 'Accept-Encoding' not in req_headers:
             req_headers['Accept-Encoding'] = 'identity'
         if 'User-Agent' not in req_headers:
-            req_headers['User-Agent'] = 'arequest/0.2.0'
+            req_headers['User-Agent'] = 'arequest/1.0.3'
+        
+        # Add cookies to request (like requests.Session)
+        if self.cookies and 'Cookie' not in req_headers:
+            cookie_str = '; '.join(f'{k}={v}' for k, v in self.cookies.items())
+            if cookie_str:
+                req_headers['Cookie'] = cookie_str
         
         request_auth = auth or self.auth
         if request_auth and hasattr(request_auth, 'apply'):
@@ -646,6 +667,9 @@ class Session:
                 reason=parser.reason,
                 elapsed=elapsed,
             )
+            
+            # Store cookies from Set-Cookie headers (like requests.Session)
+            self._extract_cookies(parser.set_cookies)
             
             pool.release(reader, writer, keep_alive=parser.keep_alive)
             reader = writer = None

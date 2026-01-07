@@ -22,7 +22,7 @@ class FastHTTPParser:
     __slots__ = (
         'status_code', 'reason', 'headers', 'body', 'keep_alive',
         '_content_length', '_chunked', '_body_parts', '_headers_complete',
-        '_message_complete'
+        '_message_complete', 'set_cookies'
     )
     
     def __init__(self) -> None:
@@ -36,6 +36,7 @@ class FastHTTPParser:
         self._body_parts: list[bytes] = []
         self._headers_complete: bool = False
         self._message_complete: bool = False
+        self.set_cookies: list[str] = []  # Store all Set-Cookie headers
     
     # httptools callbacks
     def on_status(self, status: bytes) -> None:
@@ -44,9 +45,13 @@ class FastHTTPParser:
     def on_header(self, name: bytes, value: bytes) -> None:
         key = name.decode('latin-1', errors='replace')
         val = value.decode('latin-1', errors='replace')
-        self.headers[key] = val
         
         key_lower = key.lower()
+        if key_lower == 'set-cookie':
+            self.set_cookies.append(val)
+        else:
+            self.headers[key] = val
+        
         if key_lower == 'content-length':
             self._content_length = int(val)
         elif key_lower == 'transfer-encoding' and 'chunked' in val.lower():
@@ -78,6 +83,7 @@ class FastHTTPParser:
         self._body_parts = []
         self._headers_complete = False
         self._message_complete = False
+        self.set_cookies = []
         
         if HTTPTOOLS_AVAILABLE:
             await self._parse_httptools(reader)
@@ -118,6 +124,7 @@ class FastHTTPParser:
         content_length_key = b'content-length'
         transfer_encoding_key = b'transfer-encoding'
         connection_key = b'connection'
+        set_cookie_key = b'set-cookie'
         
         for line in header_bytes[status_end+2:-4].split(b'\r\n'):
             if not line:
@@ -126,10 +133,14 @@ class FastHTTPParser:
             if colon > 0:
                 key = line[:colon].decode('latin-1')
                 value = line[colon+1:].strip().decode('latin-1')
-                self.headers[key] = value
                 
                 # Use byte comparison for better performance
                 kl_bytes = line[:colon].lower()
+                if kl_bytes == set_cookie_key:
+                    self.set_cookies.append(value)
+                else:
+                    self.headers[key] = value
+                
                 if kl_bytes == content_length_key:
                     self._content_length = int(value)
                 elif kl_bytes == transfer_encoding_key:
