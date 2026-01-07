@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Ultra-fast async HTTP client - faster than aiohttp with requests-like API"
 readme = "README.md"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Abhra", email = "abhraayan@gmail.com"}
 ]
