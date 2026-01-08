@@ -24,7 +24,7 @@ Example:
     asyncio.run(main())
 """
 
-__version__ = "1.0.7"
+__version__ = "1.1.0"
 
 # Import main API
 from .client import (

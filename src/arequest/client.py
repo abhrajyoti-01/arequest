@@ -64,23 +64,10 @@ def _build_multipart_formdata(
     data: Optional[dict] = None,
     files: Optional[dict] = None,
 ) -> tuple[bytes, str]:
-    """Build multipart/form-data body like requests library.
-    
-    Args:
-        data: Form fields as dict
-        files: Files dict. Values can be:
-            - tuple: (filename, content, content_type) or (filename, content)
-            - bytes: raw file content
-            - str: file path to read
-            - file-like object with read() method
-    
-    Returns:
-        Tuple of (body bytes, content-type header with boundary)
-    """
+    """Build multipart/form-data body like requests library."""
     boundary = uuid.uuid4().hex
     parts = []
     
-    # Add form fields
     if data:
         for name, value in data.items():
             if value is None:
@@ -90,17 +77,14 @@ def _build_multipart_formdata(
             part += f'{value}\r\n'
             parts.append(part.encode('utf-8'))
     
-    # Add files
     if files:
         for field_name, file_info in files.items():
-            filename = field_name
-            content: bytes = b''
-            content_type = 'application/octet-stream'
-            
             if isinstance(file_info, tuple):
                 if len(file_info) >= 2:
-                    filename = file_info[0] or field_name
+                    filename = file_info[0]
                     file_content = file_info[1]
+                    content_type = file_info[2] if len(file_info) >= 3 else None
+                    
                     if isinstance(file_content, bytes):
                         content = file_content
                     elif isinstance(file_content, str):
@@ -109,65 +93,71 @@ def _build_multipart_formdata(
                         content = file_content.read()
                         if isinstance(content, str):
                             content = content.encode('utf-8')
-                if len(file_info) >= 3:
-                    content_type = file_info[2]
+                    else:
+                        content = str(file_content).encode('utf-8')
+                    
+                    if filename is None:
+                        part = f'--{boundary}\r\n'.encode('utf-8')
+                        part += f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'.encode('utf-8')
+                        part += content
+                        part += b'\r\n'
+                    else:
+                        if content_type is None:
+                            ext = os.path.splitext(filename)[1].lower()
+                            mime_types = {
+                                '.txt': 'text/plain', '.html': 'text/html', '.css': 'text/css',
+                                '.js': 'application/javascript', '.json': 'application/json',
+                                '.xml': 'application/xml', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                                '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp',
+                                '.pdf': 'application/pdf', '.zip': 'application/zip',
+                            }
+                            content_type = mime_types.get(ext, 'application/octet-stream')
+                        part = f'--{boundary}\r\n'.encode('utf-8')
+                        part += f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode('utf-8')
+                        part += f'Content-Type: {content_type}\r\n\r\n'.encode('utf-8')
+                        part += content
+                        part += b'\r\n'
+                    parts.append(part)
+                else:
+                    continue
             elif isinstance(file_info, bytes):
-                content = file_info
+                part = f'--{boundary}\r\n'.encode('utf-8')
+                part += f'Content-Disposition: form-data; name="{field_name}"; filename="{field_name}"\r\n'.encode('utf-8')
+                part += b'Content-Type: application/octet-stream\r\n\r\n'
+                part += file_info
+                part += b'\r\n'
+                parts.append(part)
             elif isinstance(file_info, str):
-                # It's a file path
                 if os.path.isfile(file_info):
                     with open(file_info, 'rb') as f:
                         content = f.read()
                     filename = os.path.basename(file_info)
+                    part = f'--{boundary}\r\n'.encode('utf-8')
+                    part += f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode('utf-8')
+                    part += b'Content-Type: application/octet-stream\r\n\r\n'
+                    part += content
+                    part += b'\r\n'
+                    parts.append(part)
                 else:
-                    content = file_info.encode('utf-8')
+                    part = f'--{boundary}\r\n'
+                    part += f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'
+                    part += f'{file_info}\r\n'
+                    parts.append(part.encode('utf-8'))
             elif hasattr(file_info, 'read'):
                 content = file_info.read()
                 if isinstance(content, str):
                     content = content.encode('utf-8')
-                if hasattr(file_info, 'name'):
-                    filename = os.path.basename(file_info.name)
-            
-            # Detect content type from filename
-            if content_type == 'application/octet-stream':
-                ext = os.path.splitext(filename)[1].lower()
-                content_types = {
-                    '.txt': 'text/plain',
-                    '.html': 'text/html',
-                    '.htm': 'text/html',
-                    '.css': 'text/css',
-                    '.js': 'application/javascript',
-                    '.json': 'application/json',
-                    '.xml': 'application/xml',
-                    '.jpg': 'image/jpeg',
-                    '.jpeg': 'image/jpeg',
-                    '.png': 'image/png',
-                    '.gif': 'image/gif',
-                    '.webp': 'image/webp',
-                    '.svg': 'image/svg+xml',
-                    '.pdf': 'application/pdf',
-                    '.zip': 'application/zip',
-                    '.gz': 'application/gzip',
-                    '.mp3': 'audio/mpeg',
-                    '.mp4': 'video/mp4',
-                    '.webm': 'video/webm',
-                }
-                content_type = content_types.get(ext, 'application/octet-stream')
-            
-            part = f'--{boundary}\r\n'.encode('utf-8')
-            part += f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode('utf-8')
-            part += f'Content-Type: {content_type}\r\n\r\n'.encode('utf-8')
-            part += content
-            part += b'\r\n'
-            parts.append(part)
+                filename = os.path.basename(getattr(file_info, 'name', field_name))
+                part = f'--{boundary}\r\n'.encode('utf-8')
+                part += f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode('utf-8')
+                part += b'Content-Type: application/octet-stream\r\n\r\n'
+                part += content
+                part += b'\r\n'
+                parts.append(part)
     
-    # Closing boundary
     parts.append(f'--{boundary}--\r\n'.encode('utf-8'))
     
-    body = b''.join(parts)
-    content_type_header = f'multipart/form-data; boundary={boundary}'
-    
-    return body, content_type_header
+    return b''.join(parts), f'multipart/form-data; boundary={boundary}'
 
 
 class Response:
@@ -815,7 +805,7 @@ class Session:
         set_header('Host', self._get_host_header(host, port))
         set_header('Connection', 'keep-alive')
         set_header('Accept-Encoding', 'gzip, deflate')
-        set_header('User-Agent', 'Mozilla/5.0 (compatible; arequest/1.0.9)')
+        set_header('User-Agent', 'Mozilla/5.0 (compatible; arequest/1.1.0)')
         
         # Add cookies to request
         if self.cookies and not has_header('Cookie'):
