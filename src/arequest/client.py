@@ -230,13 +230,17 @@ class Response:
     def json(self) -> Any:
         """Parse response body as JSON (requests-like) with optimized parsing."""
         if self._json_data is None:
-            # Use orjson if available for faster JSON decoding, fallback to standard json
+            import json as json_module
+            # Try orjson first (faster), but handle encoding errors gracefully
             try:
                 import orjson
-                self._json_data = orjson.loads(self._body)
+                try:
+                    self._json_data = orjson.loads(self._body)
+                except (orjson.JSONDecodeError, UnicodeDecodeError):
+                    # Fallback to standard json with text (handles encoding issues)
+                    self._json_data = json_module.loads(self.text)
             except ImportError:
-                import json
-                self._json_data = json.loads(self.text)
+                self._json_data = json_module.loads(self.text)
         return self._json_data
     
     def _detect_encoding(self) -> str:
@@ -782,7 +786,7 @@ class Session:
         if 'Accept-Encoding' not in req_headers:
             req_headers['Accept-Encoding'] = 'gzip, deflate'  # Accept compression
         if 'User-Agent' not in req_headers:
-            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.5)'
+            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.6)'
         
         # Add cookies to request (use cached cookie string)
         if self.cookies and 'Cookie' not in req_headers:
