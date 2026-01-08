@@ -238,9 +238,27 @@ class Response:
                     self._json_data = orjson.loads(self._body)
                 except (orjson.JSONDecodeError, UnicodeDecodeError):
                     # Fallback to standard json with text (handles encoding issues)
-                    self._json_data = json_module.loads(self.text)
+                    try:
+                        self._json_data = json_module.loads(self.text)
+                    except json_module.JSONDecodeError as e:
+                        # Provide helpful error message with response preview
+                        preview = self.text[:200] if len(self.text) <= 200 else self.text[:200] + '...'
+                        raise ValueError(
+                            f"Response is not valid JSON. Status: {self.status_code}, "
+                            f"Content-Type: {self.headers.get('Content-Type', 'unknown')}, "
+                            f"Body preview: {repr(preview)}"
+                        ) from e
             except ImportError:
-                self._json_data = json_module.loads(self.text)
+                try:
+                    self._json_data = json_module.loads(self.text)
+                except json_module.JSONDecodeError as e:
+                    # Provide helpful error message with response preview
+                    preview = self.text[:200] if len(self.text) <= 200 else self.text[:200] + '...'
+                    raise ValueError(
+                        f"Response is not valid JSON. Status: {self.status_code}, "
+                        f"Content-Type: {self.headers.get('Content-Type', 'unknown')}, "
+                        f"Body preview: {repr(preview)}"
+                    ) from e
         return self._json_data
     
     def _detect_encoding(self) -> str:
@@ -786,7 +804,7 @@ class Session:
         if 'Accept-Encoding' not in req_headers:
             req_headers['Accept-Encoding'] = 'gzip, deflate'  # Accept compression
         if 'User-Agent' not in req_headers:
-            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.6)'
+            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.7)'
         
         # Add cookies to request (use cached cookie string)
         if self.cookies and 'Cookie' not in req_headers:
