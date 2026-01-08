@@ -815,7 +815,7 @@ class Session:
         set_header('Host', self._get_host_header(host, port))
         set_header('Connection', 'keep-alive')
         set_header('Accept-Encoding', 'gzip, deflate')
-        set_header('User-Agent', 'Mozilla/5.0 (compatible; arequest/1.0.8)')
+        set_header('User-Agent', 'Mozilla/5.0 (compatible; arequest/1.0.9)')
         
         # Add cookies to request
         if self.cookies and not has_header('Cookie'):
@@ -836,7 +836,8 @@ class Session:
         # Priority: files > json > data (same as requests)
         if files is not None:
             body, content_type = _build_multipart_formdata(data if isinstance(data, dict) else None, files)
-            set_header('Content-Type', content_type)
+            # MUST force Content-Type because boundary in body must match header
+            set_header('Content-Type', content_type, force=True)
             set_header('Accept', '*/*')
         elif json is not None:
             try:
