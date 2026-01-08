@@ -788,29 +788,40 @@ class Session:
         is_ssl = scheme == 'https'
         verify_ssl = verify if verify is not None else self.verify
         
-        # Optimize header merging
+        # Optimize header merging with case-insensitive handling
         if headers:
             req_headers = {**self._default_headers, **headers}
         else:
             req_headers = self._default_headers.copy() if self._default_headers else {}
         
-        # Set required headers only if not present (use cached values)
-        if 'Host' not in req_headers:
-            req_headers['Host'] = self._get_host_header(host, port)
-        if 'Connection' not in req_headers:
-            req_headers['Connection'] = 'keep-alive'
-        if 'Accept' not in req_headers:
-            req_headers['Accept'] = '*/*'
-        if 'Accept-Encoding' not in req_headers:
-            req_headers['Accept-Encoding'] = 'gzip, deflate'  # Accept compression
-        if 'User-Agent' not in req_headers:
-            req_headers['User-Agent'] = 'Mozilla/5.0 (compatible; arequest/1.0.7)'
+        # Normalize common header keys to proper case (HTTP headers are case-insensitive)
+        header_lower_map = {k.lower(): k for k in req_headers}
         
-        # Add cookies to request (use cached cookie string)
-        if self.cookies and 'Cookie' not in req_headers:
+        # Helper to check if header exists (case-insensitive)
+        def has_header(name: str) -> bool:
+            return name.lower() in header_lower_map
+        
+        # Helper to get/set header (normalizes to proper case)
+        def set_header(name: str, value: str, force: bool = False) -> None:
+            lower_name = name.lower()
+            if lower_name in header_lower_map and not force:
+                return
+            if lower_name in header_lower_map:
+                del req_headers[header_lower_map[lower_name]]
+            req_headers[name] = value
+            header_lower_map[lower_name] = name
+        
+        # Set required headers
+        set_header('Host', self._get_host_header(host, port))
+        set_header('Connection', 'keep-alive')
+        set_header('Accept-Encoding', 'gzip, deflate')
+        set_header('User-Agent', 'Mozilla/5.0 (compatible; arequest/1.0.8)')
+        
+        # Add cookies to request
+        if self.cookies and not has_header('Cookie'):
             cookie_str = self._get_cookie_header()
             if cookie_str:
-                req_headers['Cookie'] = cookie_str
+                set_header('Cookie', cookie_str)
         
         # Apply authentication
         request_auth = auth or self.auth
@@ -819,45 +830,41 @@ class Session:
                 headers = req_headers
             request_auth.apply(_TempReq())
         
-        # Build request body with automatic Content-Type like requests library
+        # Build request body with automatic Content-Type and Accept headers
         body: Optional[bytes] = None
         
         # Priority: files > json > data (same as requests)
         if files is not None:
-            # multipart/form-data for file uploads
             body, content_type = _build_multipart_formdata(data if isinstance(data, dict) else None, files)
-            if 'Content-Type' not in req_headers:
-                req_headers['Content-Type'] = content_type
+            set_header('Content-Type', content_type)
+            set_header('Accept', '*/*')
         elif json is not None:
-            # application/json
             try:
                 import orjson
                 body = orjson.dumps(json)
             except ImportError:
                 import json as json_module
                 body = json_module.dumps(json, separators=(',', ':')).encode('utf-8')
-            if 'Content-Type' not in req_headers:
-                req_headers['Content-Type'] = 'application/json'
+            # For JSON requests, FORCE proper headers (GraphQL APIs require this)
+            set_header('Content-Type', 'application/json', force=True)
+            set_header('Accept', 'application/json', force=True)
         elif data is not None:
             if isinstance(data, dict):
-                # application/x-www-form-urlencoded for dict data
                 body = urlencode(data).encode('utf-8')
-                if 'Content-Type' not in req_headers:
-                    req_headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                set_header('Content-Type', 'application/x-www-form-urlencoded')
             elif isinstance(data, str):
                 body = data.encode('utf-8')
-                # For raw string, set text/plain if no Content-Type
-                if 'Content-Type' not in req_headers:
-                    req_headers['Content-Type'] = 'text/plain; charset=utf-8'
+                set_header('Content-Type', 'text/plain; charset=utf-8')
             else:
-                # Raw bytes - user should set their own Content-Type
                 body = data
+            set_header('Accept', '*/*')
+        else:
+            set_header('Accept', '*/*')
         
         if body:
-            req_headers['Content-Length'] = str(len(body))
-            # Auto-set Origin for POST/PUT/PATCH if not present (common for web scraping)
-            if method.upper() in ('POST', 'PUT', 'PATCH') and 'Origin' not in req_headers:
-                req_headers['Origin'] = f"{scheme}://{host}" if port in (80, 443) else f"{scheme}://{host}:{port}"
+            set_header('Content-Length', str(len(body)), force=True)
+            if method.upper() in ('POST', 'PUT', 'PATCH'):
+                set_header('Origin', f"{scheme}://{host}" if port in (80, 443) else f"{scheme}://{host}:{port}")
         
         request_bytes = self._builder_class.build(method.upper(), path, req_headers, body)
         
@@ -879,9 +886,18 @@ class Session:
             # Decompress response body if needed
             body = parser.body
             content_encoding = parser.headers.get('Content-Encoding', '')
+            
+            # Try decompression if Content-Encoding header is present
             if content_encoding:
                 try:
                     body = _decompress(body, content_encoding)
+                except Exception:
+                    pass  # Use original body if decompression fails
+            
+            # Auto-detect gzip even without Content-Encoding header (some servers misconfigure this)
+            elif body and len(body) >= 2 and body[:2] == b'\x1f\x8b':
+                try:
+                    body = _decompress(body, 'gzip')
                 except Exception:
                     pass  # Use original body if decompression fails
             
