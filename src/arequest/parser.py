@@ -1,13 +1,12 @@
-"""High-performance HTTP parsing with optional C-extension support.
+"""HTTP parsing with httptools C extension.
 
-Uses httptools when available for faster parsing and falls back to an optimized
-pure-Python implementation.
+Uses httptools for blazing fast parsing, falls back to optimized
+pure-Python parser if unavailable.
 """
 
 import asyncio
 from typing import Optional
 
-# Try to import httptools for C-speed parsing
 try:
     import httptools
     HTTPTOOLS_AVAILABLE = True
@@ -15,239 +14,207 @@ except ImportError:
     httptools = None
     HTTPTOOLS_AVAILABLE = False
 
+# Pre-compiled constants
+_CRLF = b'\r\n'
+_COLON = b':'
+
 
 class FastHTTPParser:
-    """High-performance HTTP response parser using httptools when available."""
+    """HTTP parser using httptools C extension."""
     
     __slots__ = (
         'status_code', 'reason', 'headers', 'body', 'keep_alive',
-        '_content_length', '_chunked', '_body_parts', '_headers_complete',
-        '_message_complete', 'set_cookies'
+        '_clen', '_chunked', '_parts', '_hdone', '_done', 'set_cookies'
     )
     
-    def __init__(self) -> None:
-        self.status_code: int = 0
-        self.reason: str = ""
-        self.headers: dict[str, str] = {}
-        self.body: bytes = b""
-        self.keep_alive: bool = True
-        self._content_length: Optional[int] = None
-        self._chunked: bool = False
-        self._body_parts: list[bytes] = []
-        self._headers_complete: bool = False
-        self._message_complete: bool = False
-        self.set_cookies: list[str] = []  # Store all Set-Cookie headers
+    def __init__(self):
+        self.status_code = 0
+        self.reason = ''
+        self.headers = {}
+        self.body = b''
+        self.keep_alive = True
+        self._clen = None
+        self._chunked = False
+        self._parts = []
+        self._hdone = False
+        self._done = False
+        self.set_cookies = []
     
-    # httptools callbacks
-    def on_status(self, status: bytes) -> None:
+    def on_status(self, status: bytes):
         self.reason = status.decode('latin-1', errors='replace')
     
-    def on_header(self, name: bytes, value: bytes) -> None:
-        key = name.decode('latin-1', errors='replace')
-        val = value.decode('latin-1', errors='replace')
+    def on_header(self, name: bytes, value: bytes):
+        k = name.decode('latin-1', errors='replace')
+        v = value.decode('latin-1', errors='replace')
+        kl = k.lower()
         
-        key_lower = key.lower()
-        if key_lower == 'set-cookie':
-            self.set_cookies.append(val)
+        if kl == 'set-cookie':
+            self.set_cookies.append(v)
         else:
-            self.headers[key] = val
+            self.headers[k] = v
         
-        if key_lower == 'content-length':
-            self._content_length = int(val)
-        elif key_lower == 'transfer-encoding' and 'chunked' in val.lower():
+        if kl == 'content-length':
+            self._clen = int(v)
+        elif kl == 'transfer-encoding' and 'chunked' in v.lower():
             self._chunked = True
-        elif key_lower == 'connection' and 'close' in val.lower():
+        elif kl == 'connection' and 'close' in v.lower():
             self.keep_alive = False
     
-    def on_headers_complete(self) -> None:
-        self._headers_complete = True
+    def on_headers_complete(self):
+        self._hdone = True
     
-    def on_body(self, body: bytes) -> None:
-        self._body_parts.append(body)
+    def on_body(self, data: bytes):
+        self._parts.append(data)
     
-    def on_message_complete(self) -> None:
-        self._message_complete = True
-        if self._body_parts:
-            self.body = b''.join(self._body_parts) if len(self._body_parts) > 1 else self._body_parts[0]
+    def on_message_complete(self):
+        self._done = True
+        if self._parts:
+            self.body = b''.join(self._parts) if len(self._parts) > 1 else self._parts[0]
     
-    async def parse(self, reader: asyncio.StreamReader) -> None:
-        """Parse HTTP response from reader."""
-        # Reset state
+    async def parse(self, reader: asyncio.StreamReader):
         self.status_code = 0
-        self.reason = ""
+        self.reason = ''
         self.headers = {}
-        self.body = b""
+        self.body = b''
         self.keep_alive = True
-        self._content_length = None
+        self._clen = None
         self._chunked = False
-        self._body_parts = []
-        self._headers_complete = False
-        self._message_complete = False
+        self._parts = []
+        self._hdone = False
+        self._done = False
         self.set_cookies = []
         
         if HTTPTOOLS_AVAILABLE:
-            await self._parse_httptools(reader)
+            await self._parse_fast(reader)
         else:
-            await self._parse_python(reader)
+            await self._parse_py(reader)
     
-    async def _parse_httptools(self, reader: asyncio.StreamReader) -> None:
-        """Parse using httptools C extension with optimized buffer handling."""
+    async def _parse_fast(self, reader):
         parser = httptools.HttpResponseParser(self)
         
-        # Read first chunk - typically contains headers + part of body
-        data = await reader.read(65536)  # 64KB initial read
-        if data:
-            parser.feed_data(data)
+        # Big initial read - usually gets headers + body start
+        chunk = await reader.read(65536)
+        if chunk:
+            parser.feed_data(chunk)
         
-        # Continue reading if message not complete
-        while not self._message_complete:
-            data = await reader.read(262144)  # 256KB buffer for body
-            if not data:
+        while not self._done:
+            chunk = await reader.read(262144)
+            if not chunk:
                 break
-            parser.feed_data(data)
+            parser.feed_data(chunk)
         
         self.status_code = parser.get_status_code()
         if 'Connection' not in self.headers:
             self.keep_alive = parser.should_keep_alive()
     
-    async def _parse_python(self, reader: asyncio.StreamReader) -> None:
-        """Pure Python parsing fallback with optimizations."""
-        # Read headers with larger buffer hint
-        header_bytes = await reader.readuntil(b'\r\n\r\n')
+    async def _parse_py(self, reader):
+        raw = await reader.readuntil(b'\r\n\r\n')
         
-        # Parse status line
-        status_end = header_bytes.find(b'\r\n')
-        status_line = header_bytes[:status_end]
-        parts = status_line.split(b' ', 2)
+        idx = raw.find(_CRLF)
+        parts = raw[:idx].split(b' ', 2)
         self.status_code = int(parts[1])
         if len(parts) > 2:
             self.reason = parts[2].decode('latin-1', errors='replace')
         
-        # Parse headers with optimized lookup
-        # Pre-calculate common header lookups
-        content_length_key = b'content-length'
-        transfer_encoding_key = b'transfer-encoding'
-        connection_key = b'connection'
-        set_cookie_key = b'set-cookie'
-        
-        for line in header_bytes[status_end+2:-4].split(b'\r\n'):
+        for line in raw[idx + 2:-4].split(_CRLF):
             if not line:
                 break
-            colon = line.find(b':')
-            if colon > 0:
-                key = line[:colon].decode('latin-1')
-                value = line[colon+1:].strip().decode('latin-1')
+            sep = line.find(_COLON)
+            if sep > 0:
+                k = line[:sep].decode('latin-1')
+                v = line[sep + 1:].strip().decode('latin-1')
+                kl = k.lower()
                 
-                # Use byte comparison for better performance
-                kl_bytes = line[:colon].lower()
-                if kl_bytes == set_cookie_key:
-                    self.set_cookies.append(value)
+                if kl == 'set-cookie':
+                    self.set_cookies.append(v)
                 else:
-                    self.headers[key] = value
+                    self.headers[k] = v
                 
-                if kl_bytes == content_length_key:
-                    self._content_length = int(value)
-                elif kl_bytes == transfer_encoding_key:
-                    if b'chunked' in line[colon+1:].lower():
-                        self._chunked = True
-                elif kl_bytes == connection_key:
-                    if b'close' in line[colon+1:].lower():
-                        self.keep_alive = False
+                if kl == 'content-length':
+                    self._clen = int(v)
+                elif kl == 'transfer-encoding' and 'chunked' in v.lower():
+                    self._chunked = True
+                elif kl == 'connection' and 'close' in v.lower():
+                    self.keep_alive = False
         
-        # Read body with optimizations
         if self._chunked:
-            chunks = []
+            parts = []
             while True:
-                size_line = await reader.readline()
-                size = int(size_line.strip().split(b';')[0], 16)
-                if size == 0:
+                line = await reader.readline()
+                sz = int(line.strip().split(b';')[0], 16)
+                if sz == 0:
                     await reader.readline()
                     break
-                chunks.append(await reader.readexactly(size))
+                parts.append(await reader.readexactly(sz))
                 await reader.readexactly(2)
-            self.body = b''.join(chunks) if len(chunks) > 1 else (chunks[0] if chunks else b'')
-        elif self._content_length:
-            self.body = await reader.readexactly(self._content_length)
+            self.body = b''.join(parts)
+        elif self._clen:
+            self.body = await reader.readexactly(self._clen)
 
 
 class FastHTTPRequestBuilder:
-    """Optimized HTTP request builder with pre-encoded common parts."""
+    """Fast HTTP request builder with caching."""
     
-    # Pre-encoded constants
     _CRLF = b'\r\n'
     _HTTP11 = b' HTTP/1.1\r\n'
-    _COLON_SPACE = b': '
+    _SEP = b': '
     
-    # Pre-encoded common headers
-    _COMMON_HEADERS = {
-        'Host': b'Host: ',
-        'Connection': b'Connection: ',
-        'Accept': b'Accept: ',
-        'Accept-Encoding': b'Accept-Encoding: ',
-        'User-Agent': b'User-Agent: ',
-        'Content-Type': b'Content-Type: ',
-        'Content-Length': b'Content-Length: ',
-        'Authorization': b'Authorization: ',
+    _METHODS = {
+        'GET': b'GET', 'POST': b'POST', 'PUT': b'PUT',
+        'DELETE': b'DELETE', 'PATCH': b'PATCH',
+        'HEAD': b'HEAD', 'OPTIONS': b'OPTIONS'
     }
     
-    # Pre-encoded common values
-    _COMMON_VALUES = {
-        'keep-alive': b'keep-alive',
-        '*/*': b'*/*',
-        'identity': b'identity',
+    _HEADERS = {
+        'Host': b'Host: ', 'Connection': b'Connection: ',
+        'Accept': b'Accept: ', 'Accept-Encoding': b'Accept-Encoding: ',
+        'User-Agent': b'User-Agent: ', 'Content-Type': b'Content-Type: ',
+        'Content-Length': b'Content-Length: ', 'Authorization': b'Authorization: ',
+        'Cookie': b'Cookie: ', 'Origin': b'Origin: '
+    }
+    
+    _VALUES = {
+        'keep-alive': b'keep-alive', '*/*': b'*/*',
         'application/json': b'application/json',
         'application/x-www-form-urlencoded': b'application/x-www-form-urlencoded',
-    }
-    
-    # Cache for encoded method bytes
-    _METHOD_CACHE = {
-        'GET': b'GET',
-        'POST': b'POST',
-        'PUT': b'PUT',
-        'DELETE': b'DELETE',
-        'PATCH': b'PATCH',
-        'HEAD': b'HEAD',
-        'OPTIONS': b'OPTIONS',
+        'gzip, deflate': b'gzip, deflate'
     }
     
     @staticmethod
-    def build(method: str, path: str, headers: dict[str, str], body: Optional[bytes] = None) -> bytes:
-        """Build HTTP request bytes with minimal allocations and maximum caching."""
-        # Use cached method or encode
-        method_bytes = FastHTTPRequestBuilder._METHOD_CACHE.get(method, method.encode('ascii'))
+    def build(method: str, path: str, headers: dict, body: bytes = None) -> bytes:
+        out = bytearray()
         
-        # Pre-allocate estimated size to reduce reallocations
-        estimated_size = len(method_bytes) + len(path) + 20  # method + path + HTTP/1.1\r\n
-        # Build request line
-        parts = [
-            method_bytes,
-            b' ',
-            path.encode('ascii') if isinstance(path, str) else path,
-            FastHTTPRequestBuilder._HTTP11,
-        ]
+        # Method
+        m = FastHTTPRequestBuilder._METHODS.get(method)
+        out.extend(m if m else method.encode())
+        out.extend(b' ')
         
-        # Optimize header encoding
-        for key, value in headers.items():
-            header_key = FastHTTPRequestBuilder._COMMON_HEADERS.get(key)
-            if header_key:
-                parts.append(header_key)
+        # Path
+        out.extend(path.encode() if isinstance(path, str) else path)
+        out.extend(FastHTTPRequestBuilder._HTTP11)
+        
+        # Headers
+        for k, v in headers.items():
+            hk = FastHTTPRequestBuilder._HEADERS.get(k)
+            if hk:
+                out.extend(hk)
             else:
-                parts.append(key.encode('ascii'))
-                parts.append(FastHTTPRequestBuilder._COLON_SPACE)
+                out.extend(k.encode())
+                out.extend(FastHTTPRequestBuilder._SEP)
             
-            value_bytes = FastHTTPRequestBuilder._COMMON_VALUES.get(value)
-            if value_bytes:
-                parts.append(value_bytes)
-            elif isinstance(value, str):
-                parts.append(value.encode('latin-1'))
+            hv = FastHTTPRequestBuilder._VALUES.get(v)
+            if hv:
+                out.extend(hv)
+            elif isinstance(v, str):
+                out.extend(v.encode('latin-1'))
             else:
-                parts.append(value)
+                out.extend(v)
             
-            parts.append(FastHTTPRequestBuilder._CRLF)
+            out.extend(FastHTTPRequestBuilder._CRLF)
         
-        parts.append(FastHTTPRequestBuilder._CRLF)
+        out.extend(FastHTTPRequestBuilder._CRLF)
         
         if body:
-            parts.append(body)
+            out.extend(body)
         
-        return b''.join(parts)
+        return bytes(out)
