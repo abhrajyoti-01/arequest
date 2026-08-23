@@ -19,7 +19,7 @@ Example:
     asyncio.run(main())
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 from .auth import AuthBase, BasicAuth, BearerAuth
 from .client import (
@@ -41,6 +41,7 @@ from .client import (
     TimeoutError,
     TooManyRedirects,
     TransportError,
+    WebSocket,
     aclose,
     available_profiles,
     delete,
@@ -52,6 +53,7 @@ from .client import (
     put,
     request,
 )
+from .proxypool import ProxyPool
 
 __all__ = [
     "__version__",
@@ -70,6 +72,8 @@ __all__ = [
     "options",
     "aclose",
     "available_profiles",
+    "ProxyPool",
+    "WebSocket",
     "AuthBase",
     "BasicAuth",
     "BearerAuth",

@@ -24,11 +24,13 @@ Example:
 
 import asyncio
 import inspect
-from collections.abc import Iterable, Mapping, Sequence
+import json
+import os
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional, Union
 from urllib.parse import urljoin, urlsplit
 
-from curl_cffi.requests import Headers
+from curl_cffi.requests import Headers, WebSocket
 
 from .exceptions import (
     ClientError,
@@ -49,10 +51,41 @@ from .exceptions import (
 from .limits import AsyncRateLimiter
 from .models import PreparedRequest, Response, Timeout, normalize_timeout
 from .profiles import available_profiles, resolve_impersonate
+from .proxypool import ProxyPool
 from .retry import RetryPolicy
 from .transport import CurlTransport, create_cookie_jar, normalize_http_version
 
 _UNSET = object()
+
+
+class _AsyncSocketHandle:
+    """Thin wrapper adding ``async with`` support to impersonated sockets."""
+
+    __slots__ = ("_socket",)
+
+    def __init__(self, socket: Any) -> None:
+        self._socket = socket
+
+    @property
+    def raw(self) -> Any:
+        return self._socket
+
+    async def __aenter__(self) -> Any:
+        return self._socket
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        close = getattr(self._socket, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._socket, name)
+
+    def __repr__(self) -> str:
+        return f"<{_AsyncSocketHandle.__name__} {self._socket!r}>"
 
 
 def _merge_params(base: Any, override: Any) -> Any:
@@ -130,6 +163,8 @@ class Session:
             r.raise_for_status()
     """
 
+    _STATE_VERSION = 1
+
     def __init__(
         self,
         headers: Any = None,
@@ -142,6 +177,7 @@ class Session:
         cookies: Any = None,
         proxies: Any = None,
         proxy: Optional[str] = None,
+        proxy_pool: Any = None,
         proxy_auth: Optional[tuple[str, str]] = None,
         base_url: Optional[str] = None,
         params: Any = None,
@@ -188,6 +224,12 @@ class Session:
         self.auth = auth
         self.verify = bool(verify)
         self.proxies, self.proxy = _normalize_proxy_configuration(proxies, proxy)
+        if proxy_pool is None:
+            self._proxy_pool: Optional[ProxyPool] = None
+        elif isinstance(proxy_pool, ProxyPool):
+            self._proxy_pool = proxy_pool
+        else:
+            self._proxy_pool = ProxyPool(proxy_pool)
         self.proxy_auth = proxy_auth
         self.base_url = base_url
         self.params = params
@@ -259,6 +301,10 @@ class Session:
     @property
     def transport_name(self) -> str:
         return str(getattr(self._transport, "name", self._transport.__class__.__name__))
+
+    @property
+    def proxy_pool(self) -> Optional[ProxyPool]:
+        return self._proxy_pool
 
     async def _run_hooks(self, name: str, value: Any) -> Any:
         for hook in _hook_list(self.hooks.get(name)):
@@ -457,6 +503,11 @@ class Session:
             prepared.attempt = retries_used + 1
             await self._wait_for_rate_limit(request_url)
             release = await self._acquire_slot(request_url)
+            pool_proxy: Optional[str] = None
+            attempt_proxy = request_proxy
+            if self._proxy_pool is not None and attempt_proxy is None and not request_proxies:
+                pool_proxy = self._proxy_pool.acquire()
+                attempt_proxy = pool_proxy
             try:
                 raw_response = await self._transport.request(
                     request_method,
@@ -472,7 +523,7 @@ class Session:
                     allow_redirects=follow_redirects,
                     max_redirects=redirect_limit,
                     proxies=request_proxies,
-                    proxy=request_proxy,
+                    proxy=attempt_proxy,
                     proxy_auth=request_proxy_auth,
                     verify=request_verify,
                     referer=referer,
@@ -499,6 +550,8 @@ class Session:
             except Exception as exc:
                 release()
                 error = translate_exception(exc, request_url)
+                if pool_proxy is not None and isinstance(error, ConnectionError):
+                    self._proxy_pool.report_failure(pool_proxy)
                 if replayable and policy.should_retry(
                     request_method,
                     retries_used,
@@ -513,6 +566,8 @@ class Session:
                     raise
                 raise error from exc
 
+            if pool_proxy is not None:
+                self._proxy_pool.report_success(pool_proxy)
             is_streaming = getattr(raw_response, "queue", None) is not None
             raw_request = getattr(raw_response, "request", None)
             response_request = PreparedRequest(
@@ -613,6 +668,255 @@ class Session:
             return_exceptions=return_exceptions,
         )
 
+    async def iter_fetch(
+        self,
+        urls: Iterable[str],
+        *,
+        max_concurrency: int = 10,
+        method: str = "GET",
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
+        """Fetch URLs concurrently with a concurrency cap.
+
+        Yields each :class:`Response` as soon as it completes (completion
+        order, not URL order). With ``return_exceptions=True`` failed requests
+        are yielded as exception instances instead of aborting the iteration.
+
+        Example:
+            async for response in session.iter_fetch(urls, max_concurrency=20):
+                print(response.status_code)
+        """
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least one")
+        semaphore = asyncio.Semaphore(max_concurrency)
+        pending = {
+            asyncio.ensure_future(self._bounded_fetch(semaphore, method, url, kwargs))
+            for url in urls
+        }
+        try:
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    error = task.exception()
+                    if error is None:
+                        yield task.result()
+                    elif return_exceptions:
+                        yield error
+                    else:
+                        raise error
+        finally:
+            for task in pending:
+                task.cancel()
+
+    async def _bounded_fetch(
+        self,
+        semaphore: asyncio.Semaphore,
+        method: str,
+        url: str,
+        kwargs: Mapping[str, Any],
+    ) -> Response:
+        async with semaphore:
+            return await self.request(method, url, **kwargs)
+
+    async def save(self, path: Union[str, "os.PathLike[str]"]) -> None:
+        """Persist session state (cookies, headers, settings) to a JSON file.
+
+        Auth handlers and hooks are not serialized. Proxy credentials are -
+        protect the resulting file accordingly.
+        """
+        limiter_rate = self._rate_limiter.rate if self._rate_limiter is not None else None
+        retry = self.retry_policy
+        state = {
+            "version": self._STATE_VERSION,
+            "cookies": dict(self._cookies),
+            "headers": dict(self._headers),
+            "timeout": list(self._timeout) if isinstance(self._timeout, tuple) else self._timeout,
+            "impersonate": self.impersonate,
+            "verify": self.verify,
+            "base_url": self.base_url,
+            "proxies": self.proxies or None,
+            "proxy": self.proxy,
+            "proxy_auth": list(self.proxy_auth) if self.proxy_auth else None,
+            "params": self.params,
+            "trust_env": self.trust_env,
+            "allow_redirects": self.allow_redirects,
+            "max_redirects": self.max_redirects,
+            "default_headers": self.default_headers,
+            "default_encoding": self.default_encoding,
+            "http_version": self.http_version,
+            "accept_encoding": self.accept_encoding,
+            "stream": self.stream,
+            "connector_limit": self._connector_limit,
+            "connector_limit_per_host": self._max_per_host,
+            "rate_limit": limiter_rate,
+            "rate_limit_per_host": self._per_host_rate,
+            "rate_limit_burst": self._rate_limit_burst,
+            "retries": {
+                "total": retry.total,
+                "backoff_factor": retry.backoff_factor,
+                "max_backoff": retry.max_backoff,
+                "jitter": retry.jitter,
+                "status_forcelist": sorted(retry.status_forcelist),
+                "allowed_methods": sorted(retry.allowed_methods),
+                "respect_retry_after_header": retry.respect_retry_after_header,
+            },
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+
+    @classmethod
+    async def load(cls, path: Union[str, "os.PathLike[str]"]) -> "Session":
+        """Restore a session previously written by :meth:`save`.
+
+        Raises:
+            ValueError: If the file is not valid JSON or uses an unknown
+                state format version.
+        """
+        try:
+            with open(path, encoding="utf-8") as fh:
+                state = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"not a valid session file: {path!r}") from exc
+        if not isinstance(state, dict) or state.get("version") != cls._STATE_VERSION:
+            raise ValueError(f"unsupported session state format: {path!r}")
+
+        retries_state = state.get("retries") or {}
+        timeout_value = state.get("timeout")
+        if isinstance(timeout_value, list):
+            timeout_value = tuple(timeout_value)
+        rate_limit = state.get("rate_limit")
+        return cls(
+            headers=state.get("headers"),
+            timeout=timeout_value,
+            cookies=state.get("cookies"),
+            proxies=state.get("proxies"),
+            proxy=state.get("proxy"),
+            proxy_auth=tuple(state["proxy_auth"]) if state.get("proxy_auth") else None,
+            base_url=state.get("base_url"),
+            params=state.get("params"),
+            trust_env=bool(state.get("trust_env", True)),
+            allow_redirects=bool(state.get("allow_redirects", True)),
+            max_redirects=int(state.get("max_redirects", 30)),
+            impersonate=state.get("impersonate"),
+            default_headers=bool(state.get("default_headers", True)),
+            default_encoding=state.get("default_encoding", "utf-8"),
+            http_version=state.get("http_version", "auto"),
+            accept_encoding=state.get("accept_encoding"),
+            stream=bool(state.get("stream", False)),
+            connector_limit=int(state.get("connector_limit", 100)),
+            connector_limit_per_host=int(state.get("connector_limit_per_host", 0)),
+            rate_limit=float(rate_limit) if rate_limit is not None else None,
+            rate_limit_per_host=state.get("rate_limit_per_host"),
+            rate_limit_burst=int(state.get("rate_limit_burst", 1)),
+            retries=RetryPolicy(
+                total=retries_state.get("total", 0),
+                backoff_factor=retries_state.get("backoff_factor", 0.25),
+                max_backoff=retries_state.get("max_backoff", 30.0),
+                jitter=retries_state.get("jitter", 0.1),
+                status_forcelist=frozenset(retries_state.get("status_forcelist", ())),
+                allowed_methods=frozenset(retries_state.get("allowed_methods", ())),
+                respect_retry_after_header=bool(
+                    retries_state.get("respect_retry_after_header", True)
+                ),
+            ),
+        )
+
+    _WS_KWARGS = frozenset(
+        (
+            "headers",
+            "params",
+            "cookies",
+            "auth",
+            "timeout",
+            "allow_redirects",
+            "max_redirects",
+            "proxies",
+            "proxy",
+            "proxy_auth",
+            "verify",
+            "referer",
+            "accept_encoding",
+            "impersonate",
+            "ja3",
+            "akamai",
+            "extra_fp",
+        )
+    )
+
+    async def ws_connect(self, url: str, **kwargs: Any) -> "_AsyncSocketHandle":
+        """Open an impersonated WebSocket connection.
+
+        Accepts the same fingerprint/proxy/timeout options as :meth:`request`
+        and inherits session defaults (headers, impersonate profile, proxy
+        pool). Returns a handle delegating to the curl-impersonate socket
+        (``send_str`` / ``recv_str`` / ``send_json`` / ``recv_json`` /
+        ``ping``) that also works as an async context manager.
+
+        Example:
+            handle = await session.ws_connect("wss://echo.example")
+            async with handle as ws:
+                await ws.send_str("hello")
+                print(await ws.recv_str())
+        """
+        if self._closed:
+            raise RuntimeError("Session is closed")
+        unknown = set(kwargs) - self._WS_KWARGS
+        if unknown:
+            raise TypeError(f"unexpected arguments for ws_connect: {sorted(unknown)}")
+
+        target = urljoin(self.base_url.rstrip("/") + "/", url) if self.base_url else url
+        parts = urlsplit(target)
+        if parts.scheme.lower() not in ("ws", "wss") or not parts.hostname:
+            raise InvalidURL(f"invalid WebSocket URL: {target!r}")
+
+        options = {key: value for key, value in kwargs.items() if key in self._WS_KWARGS}
+        merged_headers = self._headers.copy()
+        user_headers = options.pop("headers", None)
+        if user_headers is not None:
+            merged_headers.update(user_headers)
+        options["headers"] = merged_headers
+        options.setdefault("timeout", self._timeout)
+        options.setdefault("verify", self.verify)
+        options.setdefault("impersonate", self.impersonate)
+        if "ja3" not in options and self.ja3:
+            options["ja3"] = self.ja3
+        if "akamai" not in options and self.akamai:
+            options["akamai"] = self.akamai
+        if "extra_fp" not in options and self.extra_fp:
+            options["extra_fp"] = self.extra_fp
+
+        request_proxy = self.proxy if options.get("proxy") is None else options["proxy"]
+        options.pop("proxy", None)
+        request_proxies = self.proxies if options.get("proxies") is None else options["proxies"]
+        options.pop("proxies", None)
+        if isinstance(request_proxies, str):
+            if request_proxy is not None:
+                raise TypeError("cannot set both proxies as a string and proxy")
+            request_proxy = request_proxies
+            request_proxies = {}
+        pool_proxy: Optional[str] = None
+        if self._proxy_pool is not None and request_proxy is None and not request_proxies:
+            pool_proxy = self._proxy_pool.acquire()
+            request_proxy = pool_proxy
+
+        if request_proxies:
+            options["proxies"] = request_proxies
+        if request_proxy:
+            options["proxy"] = request_proxy
+
+        try:
+            socket = await self._transport.ws_connect(target, **options)
+        except Exception as exc:
+            if pool_proxy is not None:
+                self._proxy_pool.report_failure(pool_proxy)
+            raise translate_exception(exc, target) from exc
+        if pool_proxy is not None:
+            self._proxy_pool.report_success(pool_proxy)
+        return _AsyncSocketHandle(socket)
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -693,6 +997,7 @@ __all__ = [
     "SSLError",
     "ServerError",
     "Session",
+    "WebSocket",
     "StreamError",
     "Timeout",
     "TimeoutError",

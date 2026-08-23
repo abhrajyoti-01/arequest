@@ -141,6 +141,71 @@ async with arequest.Session(stream=True) as session:
 Always consume or close streaming responses (`await r.aclose()`, or use the
 `async with` form) so the connection returns to the pool.
 
+## Bounded Concurrent Fetching
+
+`iter_fetch` runs many requests at once while capping in-flight requests, and
+yields each `Response` as soon as it completes:
+
+```python
+async for response in session.iter_fetch(urls, max_concurrency=20):
+    print(response.status_code)
+```
+
+- Completion order (not URL order).
+- `return_exceptions=True` yields failed requests as exception instances.
+- Any other request kwargs apply to every fetch.
+
+## Session Persistence
+
+```python
+# Persist cookies, headers and settings
+await session.save("state.json")
+
+# Later: restore a fully configured session
+session = await arequest.Session.load("state.json")
+```
+
+The state file stores cookies, headers, timeout, impersonation profile,
+proxies, retry policy, rate limits and connector limits. Auth handlers and
+hooks are not serialized; proxy credentials are stored in plain text - protect
+the file accordingly. Loading an invalid or unknown-version file raises
+`ValueError`.
+
+## Proxy Pools
+
+```python
+pool = arequest.ProxyPool(
+    ["socks5://user:pass@p1:1080", "http://p2:8080"],
+    strategy="round_robin",   # round_robin | random | failover
+    cooldown=300.0,
+)
+session = arequest.Session(proxy_pool=pool)
+```
+
+Each request takes the next healthy proxy; after a connection failure the
+proxy is skipped for `cooldown` seconds and automatically recovers.
+`pool.status()` reports health per URL. A single URL string is also accepted
+(`proxy_pool=["http://..."]`). Per-request `proxy=`/`proxies=` still override
+the pool.
+
+## WebSockets
+
+```python
+async with arequest.Session(impersonate="chrome") as session:
+    handle = await session.ws_connect("wss://example.com/socket")
+    async with handle as ws:
+        await ws.send_json({"type": "subscribe"})
+        message = await ws.recv_json()
+```
+
+`ws_connect` accepts the same options as `request()` (`headers`, `timeout`,
+`verify`, `impersonate`, `ja3`, proxies, ...) and inherits session defaults,
+so WebSocket handshakes carry the browser fingerprint too. The returned
+handle delegates to curl-impersonate's socket (`send_str`, `send_bytes`,
+`send_json`, `recv_str`, `recv_bytes`, `recv_json`, `ping`); exiting the
+`async with` block closes the underlying connection. Access the raw socket
+via `handle.raw` if needed.
+
 ## Cookies
 
 Cookies persist across requests like `requests.Session`:

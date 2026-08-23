@@ -91,6 +91,14 @@ class CurlTransport:
                 raise
             raise translate_exception(exc, url) from exc
 
+    async def ws_connect(self, url: str, **kwargs: Any) -> Any:
+        if self._closed:
+            raise RuntimeError("transport is closed")
+        try:
+            return await self._session.ws_connect(url, **kwargs)
+        except Exception as exc:
+            raise translate_exception(exc, url) from exc
+
     async def _request_with_redirects(
         self,
         method: str,

@@ -227,6 +227,53 @@ async with arequest.Session(stream=True) as s:
             process(chunk)
 ```
 
+### Bounded concurrent fetching
+
+```python
+# Yields responses as they complete, never more than 20 in flight
+async for r in session.iter_fetch(urls, max_concurrency=20):
+    print(r.status_code)
+```
+
+### WebSockets
+
+```python
+async with arequest.Session(impersonate="chrome") as session:
+    handle = await session.ws_connect("wss://example.com/socket")
+    async with handle as ws:
+        await ws.send_json({"type": "subscribe"})
+        while True:
+            message = await ws.recv_json()
+            handle_message(message)
+```
+
+WebSocket connections carry the same browser fingerprint as HTTP requests.
+
+### Proxy pools
+
+```python
+pool = arequest.ProxyPool(
+    ["socks5://user:pass@p1:1080", "http://p2:8080", "http://p3:8080"],
+    strategy="round_robin",   # or "random" / "failover"
+    cooldown=300.0,           # seconds to skip a failing proxy
+)
+session = arequest.Session(proxy_pool=pool)
+
+print(pool.status())   # {'socks5://...': True, 'http://p2:8080': False, ...}
+```
+
+Failed proxies are automatically put on cooldown and retried later.
+
+### Session persistence
+
+```python
+# Save cookies + settings to resume later
+await session.save("state.json")
+
+# Restore exactly where you left off
+session = await arequest.Session.load("state.json")
+```
+
 ### Redirect control
 
 ```python
