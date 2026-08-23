@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 
 class RequestError(Exception):
@@ -78,7 +78,7 @@ class ServerError(HTTPError):
     pass
 
 
-def translate_exception(exc: BaseException, url: Optional[str] = None) -> RequestError:
+def translate_exception(exc: BaseException, url: str | None = None) -> RequestError:
     if isinstance(exc, RequestError):
         return exc
 

@@ -3,6 +3,14 @@
 All notable changes to `arequest` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.2.0] - 2026-08-23
+
+### Changed - BREAKING
+
+- **Dropped Python 3.9 support**; arequest now requires Python 3.10+.
+- Raised the engine floor to `curl-cffi>=0.15.0`, which fixes an SSRF
+  vulnerability in redirect handling (CVE-2026-33752 / GHSA-qw2m-4pqf-rmpp).
+
 ## [2.1.0] - 2026-08-23
 
 ### Added

@@ -26,8 +26,8 @@ import asyncio
 import inspect
 import json
 import os
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
-from typing import Any, Callable, Optional, Union
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from typing import Any, Union
 from urllib.parse import urljoin, urlsplit
 
 from curl_cffi.requests import Headers, WebSocket
@@ -127,7 +127,7 @@ async def _call_hook(hook: Callable[..., Any], value: Any) -> Any:
     return value if result is None else result
 
 
-def _normalize_proxy_configuration(proxies: Any, proxy: Optional[str]) -> tuple[Any, Optional[str]]:
+def _normalize_proxy_configuration(proxies: Any, proxy: str | None) -> tuple[Any, str | None]:
     if isinstance(proxies, str):
         if proxy is not None:
             raise TypeError("cannot set both proxies as a string and proxy")
@@ -176,33 +176,33 @@ class Session:
         *,
         cookies: Any = None,
         proxies: Any = None,
-        proxy: Optional[str] = None,
+        proxy: str | None = None,
         proxy_pool: Any = None,
-        proxy_auth: Optional[tuple[str, str]] = None,
-        base_url: Optional[str] = None,
+        proxy_auth: tuple[str, str] | None = None,
+        base_url: str | None = None,
         params: Any = None,
         trust_env: bool = True,
         allow_redirects: bool = True,
         max_redirects: int = 30,
         impersonate: Any = "chrome",
-        ja3: Optional[str] = None,
-        akamai: Optional[str] = None,
+        ja3: str | None = None,
+        akamai: str | None = None,
         extra_fp: Any = None,
         default_headers: bool = True,
         default_encoding: Any = "utf-8",
         http_version: Any = "auto",
-        retries: Union[int, RetryPolicy] = 0,
-        backoff: Optional[float] = None,
+        retries: int | RetryPolicy = 0,
+        backoff: float | None = None,
         stream: bool = False,
         cert: Any = None,
-        interface: Optional[str] = None,
-        accept_encoding: Optional[str] = "gzip, deflate, br",
-        rate_limit: Optional[float] = None,
-        rate_limit_per_host: Optional[float] = None,
+        interface: str | None = None,
+        accept_encoding: str | None = "gzip, deflate, br",
+        rate_limit: float | None = None,
+        rate_limit_per_host: float | None = None,
         rate_limit_burst: int = 1,
-        hooks: Optional[Mapping[str, Any]] = None,
+        hooks: Mapping[str, Any] | None = None,
         debug: bool = False,
-        curl_options: Optional[Mapping[Any, Any]] = None,
+        curl_options: Mapping[Any, Any] | None = None,
         curl_infos: Any = None,
         transport: Any = None,
     ) -> None:
@@ -225,7 +225,7 @@ class Session:
         self.verify = bool(verify)
         self.proxies, self.proxy = _normalize_proxy_configuration(proxies, proxy)
         if proxy_pool is None:
-            self._proxy_pool: Optional[ProxyPool] = None
+            self._proxy_pool: ProxyPool | None = None
         elif isinstance(proxy_pool, ProxyPool):
             self._proxy_pool = proxy_pool
         else:
@@ -303,7 +303,7 @@ class Session:
         return str(getattr(self._transport, "name", self._transport.__class__.__name__))
 
     @property
-    def proxy_pool(self) -> Optional[ProxyPool]:
+    def proxy_pool(self) -> ProxyPool | None:
         return self._proxy_pool
 
     async def _run_hooks(self, name: str, value: Any) -> Any:
@@ -330,7 +330,7 @@ class Session:
 
     async def _acquire_slot(self, url: str) -> Callable[[], None]:
         acquired_global = False
-        host_semaphore: Optional[asyncio.Semaphore] = None
+        host_semaphore: asyncio.Semaphore | None = None
         if self._global_semaphore is not None:
             await self._global_semaphore.acquire()
             acquired_global = True
@@ -381,30 +381,30 @@ class Session:
         json: Any = None,
         files: Any = None,
         timeout: Any = _UNSET,
-        verify: Optional[bool] = None,
-        allow_redirects: Optional[bool] = None,
-        max_redirects: Optional[int] = None,
+        verify: bool | None = None,
+        allow_redirects: bool | None = None,
+        max_redirects: int | None = None,
         auth: Any = None,
         cookies: Any = None,
         proxies: Any = None,
-        proxy: Optional[str] = None,
-        proxy_auth: Optional[tuple[str, str]] = None,
+        proxy: str | None = None,
+        proxy_auth: tuple[str, str] | None = None,
         impersonate: Any = _UNSET,
         ja3: Any = _UNSET,
         akamai: Any = _UNSET,
         extra_fp: Any = _UNSET,
-        default_headers: Optional[bool] = None,
+        default_headers: bool | None = None,
         default_encoding: Any = None,
         http_version: Any = _UNSET,
-        stream: Optional[bool] = None,
+        stream: bool | None = None,
         retries: Any = _UNSET,
-        backoff: Optional[float] = None,
-        hooks: Optional[Mapping[str, Any]] = None,
-        referer: Optional[str] = None,
+        backoff: float | None = None,
+        hooks: Mapping[str, Any] | None = None,
+        referer: str | None = None,
         accept_encoding: Any = _UNSET,
-        content_callback: Optional[Callable[..., Any]] = None,
-        quote: Union[str, bool] = "",
-        interface: Optional[str] = None,
+        content_callback: Callable[..., Any] | None = None,
+        quote: str | bool = "",
+        interface: str | None = None,
         cert: Any = None,
         max_recv_speed: int = 0,
         multipart: Any = None,
@@ -503,7 +503,7 @@ class Session:
             prepared.attempt = retries_used + 1
             await self._wait_for_rate_limit(request_url)
             release = await self._acquire_slot(request_url)
-            pool_proxy: Optional[str] = None
+            pool_proxy: str | None = None
             attempt_proxy = request_proxy
             if self._proxy_pool is not None and attempt_proxy is None and not request_proxies:
                 pool_proxy = self._proxy_pool.acquire()
@@ -897,7 +897,7 @@ class Session:
                 raise TypeError("cannot set both proxies as a string and proxy")
             request_proxy = request_proxies
             request_proxies = {}
-        pool_proxy: Optional[str] = None
+        pool_proxy: str | None = None
         if self._proxy_pool is not None and request_proxy is None and not request_proxies:
             pool_proxy = self._proxy_pool.acquire()
             request_proxy = pool_proxy

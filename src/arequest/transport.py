@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 from curl_cffi.requests import AsyncSession, Cookies, Headers
@@ -58,7 +58,7 @@ class CurlTransport:
         cookies: Any = None,
         trust_env: bool = True,
         debug: bool = False,
-        curl_options: Optional[Mapping[Any, Any]] = None,
+        curl_options: Mapping[Any, Any] | None = None,
         curl_infos: Any = None,
     ) -> None:
         if max_clients < 1:

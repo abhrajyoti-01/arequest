@@ -2,7 +2,7 @@ import random
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class RetryPolicy:
         cls,
         value: Union[int, "RetryPolicy", None],
         *,
-        backoff_factor: Optional[float] = None,
+        backoff_factor: float | None = None,
     ) -> "RetryPolicy":
         if isinstance(value, cls):
             if backoff_factor is None:
@@ -77,7 +77,7 @@ class RetryPolicy:
         return min(self.max_backoff, delay)
 
 
-def _retry_after_seconds(response: Any) -> Optional[float]:
+def _retry_after_seconds(response: Any) -> float | None:
     headers = getattr(response, "headers", {})
     value = headers.get("Retry-After") if headers is not None else None
     if not value:

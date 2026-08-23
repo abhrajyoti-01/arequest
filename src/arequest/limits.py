@@ -1,6 +1,5 @@
 import asyncio
 import time
-from typing import Optional
 
 
 class AsyncRateLimiter:
@@ -17,7 +16,7 @@ class AsyncRateLimiter:
 
     async def acquire(self) -> None:
         while True:
-            wait_for: Optional[float] = None
+            wait_for: float | None = None
             async with self._lock:
                 now = time.monotonic()
                 elapsed = now - self._updated

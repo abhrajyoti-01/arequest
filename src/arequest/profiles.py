@@ -1,4 +1,4 @@
-from typing import Optional, Union, get_args
+from typing import get_args
 
 from .exceptions import ImpersonationError
 
@@ -24,7 +24,7 @@ _ALIASES = {
 }
 
 
-def resolve_impersonate(value: Optional[Union[str, bool]]) -> Optional[str]:
+def resolve_impersonate(value: str | bool | None) -> str | None:
     if value is None or value is False:
         return None
     if value is True:

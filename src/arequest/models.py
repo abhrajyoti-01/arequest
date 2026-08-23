@@ -1,9 +1,9 @@
 import codecs
 import inspect
 import json as stdlib_json
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 from .exceptions import ClientError, ServerError, StreamError, translate_exception
 
@@ -15,16 +15,16 @@ except ImportError:
 
 @dataclass(frozen=True)
 class Timeout:
-    total: Optional[float] = 30.0
-    connect: Optional[float] = None
-    read: Optional[float] = None
+    total: float | None = 30.0
+    connect: float | None = None
+    read: float | None = None
 
     def __post_init__(self) -> None:
         for value in (self.total, self.connect, self.read):
             if value is not None and value < 0:
                 raise ValueError("timeout values cannot be negative")
 
-    def as_curl(self) -> Union[float, tuple[float, float], None]:
+    def as_curl(self) -> float | tuple[float, float] | None:
         if self.connect is None and self.read is None:
             return self.total
         connect = self.connect if self.connect is not None else self.total
@@ -34,10 +34,10 @@ class Timeout:
         return float(connect), float(read)
 
 
-TimeoutValue = Union[float, int, tuple[float, float], Timeout, None]
+TimeoutValue = float | int | tuple[float, float] | Timeout | None
 
 
-def normalize_timeout(value: TimeoutValue) -> Union[float, tuple[float, float], None]:
+def normalize_timeout(value: TimeoutValue) -> float | tuple[float, float] | None:
     if isinstance(value, Timeout):
         return value.as_curl()
     if value is None:
@@ -69,8 +69,8 @@ class Response:
         self,
         raw: Any,
         *,
-        request: Optional[PreparedRequest] = None,
-        release: Optional[Callable[[], Any]] = None,
+        request: PreparedRequest | None = None,
+        release: Callable[[], Any] | None = None,
         attempts: int = 1,
     ) -> None:
         self.raw = raw
@@ -98,10 +98,10 @@ class Response:
         self._streaming = getattr(raw, "queue", None) is not None
         self._stream_started = False
         self._stream_consumed = False
-        self._encoding: Optional[str] = None
+        self._encoding: str | None = None
 
     @staticmethod
-    def _request_from_raw(raw: Any) -> Optional[PreparedRequest]:
+    def _request_from_raw(raw: Any) -> PreparedRequest | None:
         request = getattr(raw, "request", None)
         if request is None:
             return None
@@ -175,7 +175,7 @@ class Response:
             return content_type[start:].split(";", 1)[0].strip(" \t\"'") or "utf-8"
         return "utf-8"
 
-    def decode(self, encoding: Optional[str] = None) -> str:
+    def decode(self, encoding: str | None = None) -> str:
         return self.content.decode(encoding or self.encoding, errors="replace")
 
     def json(self, **kwargs: Any) -> Any:
@@ -231,7 +231,7 @@ class Response:
 
     async def aiter_content(
         self,
-        chunk_size: Optional[int] = 65536,
+        chunk_size: int | None = 65536,
         decode_unicode: bool = False,
     ) -> AsyncIterator[Any]:
         if chunk_size is not None and chunk_size <= 0:
