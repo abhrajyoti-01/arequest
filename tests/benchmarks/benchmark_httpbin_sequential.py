@@ -1,12 +1,12 @@
 """Sequential benchmark: requests vs arequest (external URL by default)."""
 
-import asyncio
 import argparse
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import asyncio
 import os
 import threading
 import time
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 try:

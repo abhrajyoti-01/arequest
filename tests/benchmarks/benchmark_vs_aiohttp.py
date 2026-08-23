@@ -1,7 +1,7 @@
 """Benchmark arequest against aiohttp (external URL by default)."""
 
-import asyncio
 import argparse
+import asyncio
 import os
 import time
 

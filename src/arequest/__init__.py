@@ -1,79 +1,89 @@
-"""arequest - High-performance async HTTP client with a requests-like API.
+"""arequest - Fast async HTTP client with real browser fingerprints.
 
-Designed for low overhead and a familiar developer experience.
+A ``requests``-style API on top of curl-impersonate: byte-exact TLS (JA3/JA4)
+and HTTP/2 (Akamai) fingerprints, connection pooling, retries, rate limiting
+and streaming responses.
 
 Example:
     import asyncio
     import arequest
-    
+
     async def main():
-        # Simple one-off request
         response = await arequest.get('https://httpbin.org/get')
         print(response.json())
-        
-        # Using session for connection reuse (recommended)
-        async with arequest.Session() as session:
-            resp = await session.get('https://httpbin.org/get')
-            print(resp.status_code)
-            
-            # Concurrent requests
-            import asyncio
-            tasks = [session.get(f'https://httpbin.org/get?i={i}') for i in range(10)]
-            responses = await asyncio.gather(*tasks)
-    
+
+        async with arequest.Session(impersonate='chrome') as session:
+            resp = await session.get('https://tls.peet.ws/api/all')
+            print(resp.json()['tls']['ja4'])
+
     asyncio.run(main())
 """
 
-__version__ = "1.2.0"
+__version__ = "2.0.0"
 
-# Import main API
+from .auth import AuthBase, BasicAuth, BearerAuth
 from .client import (
-    # Core classes
-    Session,
+    ClientError,
+    ConnectionError,
+    HTTPError,
+    ImpersonationError,
+    InvalidURL,
+    PreparedRequest,
+    ProxyError,
+    RequestError,
     Response,
-    # Convenience functions
-    request,
-    get,
-    post,
-    put,
+    RetryPolicy,
+    ServerError,
+    Session,
+    SSLError,
+    StreamError,
+    Timeout,
+    TimeoutError,
+    TooManyRedirects,
+    TransportError,
+    aclose,
+    available_profiles,
     delete,
-    patch,
+    get,
     head,
     options,
-    # Exceptions
-    ClientError,
-    ServerError,
-    TimeoutError,
-)
-
-# Import auth classes
-from .auth import (
-    AuthBase,
-    BasicAuth,
-    BearerAuth,
+    patch,
+    post,
+    put,
+    request,
 )
 
 __all__ = [
-    # Version
     "__version__",
-    # Core classes
     "Session",
     "Response",
-    # Convenience functions
+    "PreparedRequest",
+    "Timeout",
+    "RetryPolicy",
     "request",
     "get",
-    "post", 
+    "post",
     "put",
     "delete",
     "patch",
     "head",
     "options",
-    # Exceptions
-    "ClientError",
-    "ServerError",
-    "TimeoutError",
-    # Auth
+    "aclose",
+    "available_profiles",
     "AuthBase",
     "BasicAuth",
     "BearerAuth",
+    "RequestError",
+    "TransportError",
+    "ConnectionError",
+    "ProxyError",
+    "SSLError",
+    "HTTPError",
+    "ClientError",
+    "ServerError",
+    "TimeoutError",
+    "InvalidURL",
+    "TooManyRedirects",
+    "ImpersonationError",
+    "StreamError",
 ]

@@ -1,7 +1,7 @@
 """Benchmark arequest against requests library (synchronous)."""
 
-import asyncio
 import argparse
+import asyncio
 import os
 import time
 
@@ -214,29 +214,29 @@ async def run_benchmarks(test_url: str, num_requests: int) -> None:
         print("=" * 60)
         print("Comparison")
         print("=" * 60)
-        
+
         fastest = max(results, key=lambda r: r["req_per_sec"])
         fastest_label = fastest["library"]
 
         for result in results:
             marker = "  <-- FASTEST" if result["library"] == fastest_label else ""
             print(f"{result['library']:35} {result['req_per_sec']:8.2f} req/s{marker}")
-        
+
         print()
-        
+
         if HAS_REQUESTS and requests_session_result:
             # Compare arequest concurrent vs requests with session
             areq_speed = arequest_concurrent_result['req_per_sec']
             req_speed = requests_session_result['req_per_sec']
-            
+
             if areq_speed > 0 and req_speed > 0:
                 ratio = areq_speed / req_speed
                 speedup = (ratio - 1) * 100
-                
-                print(f"Performance vs requests (with session):")
+
+                print("Performance vs requests (with session):")
                 print(f"  arequest concurrent is {ratio:.2f}x faster ({speedup:+.1f}%)")
                 print()
-            
+
             # Compare arequest sequential vs requests with session
             areq_seq_speed = arequest_seq_result['req_per_sec']
             if areq_seq_speed > 0 and req_speed > 0:
@@ -251,7 +251,7 @@ async def run_benchmarks(test_url: str, num_requests: int) -> None:
         print(f"  Fastest configuration: {fastest_label}")
         print(f"  Peak performance: {fastest['req_per_sec']:.2f} requests/second")
         print()
-        
+
         if HAS_REQUESTS:
             print("KEY INSIGHTS:")
             print("  • arequest concurrent mode leverages async I/O for maximum speed")

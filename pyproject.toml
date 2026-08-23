@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arequest"
-version = "1.2.0"
-description = "Ultra-fast async HTTP client for web scraping - faster than aiohttp with requests-like API"
+version = "2.0.0"
+description = "High-throughput async browser-impersonating HTTP client for web scraping"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 dependencies = [
-    "httptools>=0.6.0",
+    "curl-cffi>=0.13.0",
     "orjson>=3.8.0",
 ]
 authors = [
@@ -19,7 +19,7 @@ authors = [
 maintainers = [
     {name = "Abhra", email = "abhraayan@gmail.com"}
 ]
-keywords = ["async", "http", "client", "requests", "asyncio", "aiohttp", "fast", "performance"]
+keywords = ["async", "http", "client", "web-scraping", "browser-impersonation", "tls", "http2", "performance"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -63,8 +63,12 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
+# E501: long lines are allowed in docs/examples
+# N818: exception names intentionally mirror requests (ClientError, ServerError, ...)
+ignore = ["E501", "N818"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,10 +1,7 @@
 """Authentication handlers for arequest."""
 
 import base64
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    pass  # No dependencies needed
+from typing import Any
 
 
 class AuthBase:

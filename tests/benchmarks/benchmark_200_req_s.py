@@ -1,10 +1,10 @@
 """Optimized benchmark targeting 200+ req/s for arequest."""
 
 import asyncio
-from contextlib import asynccontextmanager
 import os
 import statistics
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 try:
@@ -12,12 +12,6 @@ try:
     HAS_AIOHTTP = True
 except ImportError:
     HAS_AIOHTTP = False
-
-try:
-    import httpx
-    HAS_HTTPX = True
-except ImportError:
-    HAS_HTTPX = False
 
 import arequest
 
@@ -111,7 +105,7 @@ async def benchmark_arequest_optimized(
     Returns:
         Performance metrics
     """
-    print(f"\nBenchmarking arequest (optimized for 200+ req/s)...")
+    print("\nBenchmarking arequest (optimized for 200+ req/s)...")
     print(f"  Requests: {num_requests}, Concurrency: {concurrency}")
 
     start = time.perf_counter()
@@ -163,7 +157,7 @@ async def benchmark_arequest_optimized(
         avg = statistics.mean(latencies) * 1000
         p50 = statistics.median(latencies) * 1000
         p95 = (
-            statistics.quantiles(latencies, n=20)[18]
+            statistics.quantiles(latencies, n=20)[18] * 1000
             if len(latencies) > 20
             else max(latencies) * 1000
         )
@@ -197,7 +191,7 @@ async def benchmark_aiohttp_optimized(
     if not HAS_AIOHTTP:
         return {"library": "aiohttp", "req_per_sec": 0, "errors": num_requests}
 
-    print(f"\nBenchmarking aiohttp...")
+    print("\nBenchmarking aiohttp...")
     print(f"  Requests: {num_requests}, Concurrency: {concurrency}")
 
     start = time.perf_counter()
@@ -213,7 +207,7 @@ async def benchmark_aiohttp_optimized(
                 req_start = time.perf_counter()
                 try:
                     async with session.get(url) as resp:
-                        await resp.text()
+                        await resp.read()
                     latencies.append(time.perf_counter() - req_start)
                 except Exception:
                     errors += 1
@@ -228,7 +222,7 @@ async def benchmark_aiohttp_optimized(
         avg = statistics.mean(latencies) * 1000
         p50 = statistics.median(latencies) * 1000
         p95 = (
-            statistics.quantiles(latencies, n=20)[18]
+            statistics.quantiles(latencies, n=20)[18] * 1000
             if len(latencies) > 20
             else max(latencies) * 1000
         )
@@ -257,7 +251,7 @@ async def benchmark_aiohttp_optimized(
 
 async def run_benchmarks(test_url: str, num_requests: int, concurrency: int) -> None:
     """Run optimized benchmarks targeting 200+ req/s."""
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  URL: {test_url}")
     print(f"  Total requests: {num_requests}")
     print(f"  Concurrency: {concurrency}")
@@ -346,3 +340,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
