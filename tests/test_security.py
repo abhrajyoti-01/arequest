@@ -1,5 +1,6 @@
 """Security regression tests: credential masking, URL validation, file perms."""
 
+import asyncio
 import os
 import sys
 
@@ -116,20 +117,30 @@ async def test_redirect_to_out_of_range_port_raises_invalidurl():
 
 
 async def test_redirect_with_control_character_raises_invalidurl():
-    async def handler(request):
-        return web.Response(
-            status=302, headers={"Location": "https://example.invalid/\x0bnext"}
+    # aiohttp >= 3.13 refuses to serialize headers containing control
+    # characters, so serve the malformed 302 over a raw TCP socket to
+    # guarantee the client actually receives it.
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read(65536)  # consume the request
+        writer.write(
+            b"HTTP/1.1 302 Found\r\n"
+            b"Location: https://example.invalid/\x0bnext\r\n"
+            b"Content-Length: 0\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
         )
+        await writer.drain()
+        writer.close()
 
-    app = web.Application()
-    app.router.add_get("/{tail:.*}", handler)
-    runner, port = await _start_app(app)
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
     try:
         async with arequest.Session(max_redirects=5) as session:
             with pytest.raises(arequest.InvalidURL):
                 await session.get(f"http://127.0.0.1:{port}/start")
     finally:
-        await runner.cleanup()
+        server.close()
+        await server.wait_closed()
 
 
 async def test_request_url_control_characters_rejected():
