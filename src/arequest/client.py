@@ -117,7 +117,7 @@ def _body_is_replayable(data: Any, files: Any, multipart: Any) -> bool:
             candidate = value[1] if isinstance(value, tuple) and len(value) > 1 else value
             if hasattr(candidate, "read"):
                 return False
-    return data is None or isinstance(data, (bytes, bytearray, str, Mapping, list, tuple))
+    return data is None or isinstance(data, bytes | bytearray | str | Mapping | list | tuple)
 
 
 def _hook_list(value: Any) -> tuple[Callable[..., Any], ...]:

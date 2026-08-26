@@ -125,12 +125,10 @@ def translate_exception(exc: BaseException, url: str | None = None) -> RequestEr
         return TooManyRedirects(message, request=request, response=response)
     if isinstance(
         exc,
-        (
-            curl_errors.InvalidURL,
-            curl_errors.InvalidSchema,
-            curl_errors.MissingSchema,
-            curl_errors.URLRequired,
-        ),
+        curl_errors.InvalidURL
+        | curl_errors.InvalidSchema
+        | curl_errors.MissingSchema
+        | curl_errors.URLRequired,
     ):
         return InvalidURL(message, request=request, response=response)
     if isinstance(exc, curl_errors.Timeout):
@@ -139,7 +137,7 @@ def translate_exception(exc: BaseException, url: str | None = None) -> RequestEr
         return ProxyError(message, request=request, response=response)
     if isinstance(exc, curl_errors.SSLError):
         return SSLError(message, request=request, response=response)
-    if isinstance(exc, (curl_errors.DNSError, curl_errors.ConnectionError)):
+    if isinstance(exc, curl_errors.DNSError | curl_errors.ConnectionError):
         return ConnectionError(message, request=request, response=response)
     if isinstance(exc, curl_errors.RequestException):
         return TransportError(message, request=request, response=response)

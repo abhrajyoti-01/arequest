@@ -97,7 +97,7 @@ class CurlTransport:
         try:
             return await self._request_with_redirects(method, url, kwargs)
         except Exception as exc:
-            if isinstance(exc, (InvalidURL, TooManyRedirects)):
+            if isinstance(exc, InvalidURL | TooManyRedirects):
                 raise
             raise translate_exception(exc, url) from exc
 

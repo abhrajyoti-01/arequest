@@ -51,7 +51,7 @@ def normalize_timeout(value: TimeoutValue) -> float | tuple[float, float] | None
         if connect < 0 or read < 0:
             raise ValueError("timeout values cannot be negative")
         return float(connect), float(read)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError("timeout must be a number, a (connect, read) tuple, Timeout, or None")
     if value < 0:
         raise ValueError("timeout cannot be negative")
