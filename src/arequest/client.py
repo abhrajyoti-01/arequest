@@ -26,6 +26,8 @@ import asyncio
 import inspect
 import json
 import os
+import random
+import time
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from typing import Any, Union
 from urllib.parse import urljoin, urlsplit
@@ -46,6 +48,8 @@ from .exceptions import (
     TimeoutError,
     TooManyRedirects,
     TransportError,
+    contains_control_characters,
+    strip_credentials,
     translate_exception,
 )
 from .limits import AsyncRateLimiter
@@ -56,6 +60,10 @@ from .retry import RetryPolicy
 from .transport import CurlTransport, create_cookie_jar, normalize_http_version
 
 _UNSET = object()
+
+
+def _noop() -> None:
+    """No-op release used on the un-limited fast path."""
 
 
 class _AsyncSocketHandle:
@@ -135,6 +143,140 @@ def _normalize_proxy_configuration(proxies: Any, proxy: str | None) -> tuple[Any
     return dict(proxies or {}), proxy
 
 
+# User-Agent strings that match the shipped impersonation profiles. Kept in
+# sync with the profile families shipped by curl_cffi's BrowserTypeLiteral.
+_USER_AGENTS = {
+    "chrome": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    ),
+    "firefox": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) "
+        "Gecko/20100101 Firefox/133.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:133.0) "
+        "Gecko/20100101 Firefox/133.0",
+    ),
+    "safari": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_1) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/18.1.1 Safari/605.1.15",
+    ),
+    "edge": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.2903.70",
+    ),
+}
+_GENERIC_UA_POOL = tuple(ua for pool in _USER_AGENTS.values() for ua in pool)
+
+# Common, real-world Accept-Language header values weighted toward English but
+# reflecting typical browser diversity.
+_ACCEPT_LANGUAGES = (
+    "en-US,en;q=0.9",
+    "en-US,en;q=0.9",
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.9",
+    "en-US,en;q=0.8",
+    "en;q=0.9,en-US;q=0.8",
+)
+
+
+class _UserAgentRotator:
+    """Rotates through a pool of User-Agent strings.
+
+    ``source`` may be ``None`` (no rotation), ``"auto"`` (derive from the
+    session's impersonate profile), a single UA string, or an iterable of UA
+    strings.
+    """
+
+    __slots__ = ("_pool", "_index")
+
+    def __init__(self, source: Any, impersonate: str | None) -> None:
+        self._pool: tuple[str, ...] = ()
+        self._index = 0
+        if source is None or source is False:
+            return
+        if source is True or source == "auto":
+            family = (impersonate or "chrome")
+            for key, pool in _USER_AGENTS.items():
+                if family.startswith(key):
+                    self._pool = pool
+                    return
+            self._pool = _GENERIC_UA_POOL
+            return
+        if isinstance(source, str):
+            self._pool = (source,)
+            return
+        pool = tuple(str(u) for u in source)
+        if not pool:
+            return
+        self._pool = pool
+
+    @property
+    def enabled(self) -> bool:
+        return len(self._pool) > 1
+
+    def next(self) -> str | None:
+        if not self._pool:
+            return None
+        if len(self._pool) == 1:
+            return self._pool[0]
+        ua = self._pool[self._index % len(self._pool)]
+        self._index += 1
+        return ua
+
+
+def _normalize_think_time(value: Any) -> tuple[float, float] | None:
+    if value is None or value is False:
+        return None
+    if isinstance(value, int | float):
+        delay = float(value)
+        if delay < 0:
+            raise ValueError("think_time cannot be negative")
+        return (delay, delay)
+    if isinstance(value, tuple | list) and len(value) == 2:
+        low, high = float(value[0]), float(value[1])
+        if low < 0 or high < 0:
+            raise ValueError("think_time values cannot be negative")
+        if high < low:
+            low, high = high, low
+        return (low, high)
+    raise TypeError("think_time must be a number, a (min, max) tuple, or None")
+
+
+def _build_realistic_headers(impersonate: str | None, user_agent: str | None) -> dict[str, str]:
+    """Build a coherent browser-like request header set.
+
+    These complement (not replace) curl-impersonate's fingerprint headers,
+    so they are only applied when the caller has not explicitly set them.
+    """
+    family = (impersonate or "chrome").lower()
+    headers: dict[str, str] = {
+        "Accept-Language": random.choice(_ACCEPT_LANGUAGES),
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    }
+    if family.startswith(("chrome", "edge")):
+        brand = "Microsoft Edge" if family.startswith("edge") else "Google Chrome"
+        version = (user_agent or "").split("Chrome/")[-1].split(".")[0] or "131"
+        headers.update(
+            {
+                "Sec-CH-UA": (
+                    f'"Chromium";v="{version}", "{brand}";v="{version}", '
+                    f'"Not-A.Brand";v="99"'
+                ),
+                "Sec-CH-UA-Mobile": "?0",
+                "Sec-CH-UA-Platform": '"Windows"',
+            }
+        )
+    return headers
+
+
 class Session:
     """Async HTTP session with connection pooling and browser impersonation.
 
@@ -156,6 +298,16 @@ class Session:
             or ``None`` to send plain requests.
         retries: Number of automatic retries or a
             :class:`~arequest.retry.RetryPolicy`.
+        rate_limit_jitter: Max extra random delay (seconds) added to rate-limit
+            pacing to smooth bursts.
+        realistic_headers: When ``True``, layer a coherent browser header set
+            (Accept-Language, Sec-Fetch-*, Sec-CH-UA, ...) onto each request
+            without overriding headers the caller explicitly set.
+        user_agent_rotation: Rotate the User-Agent header: ``"auto"`` derives a
+            pool from ``impersonate``; or pass a single UA string / iterable of
+            UA strings. ``None`` disables rotation.
+        think_time: Human-like pacing between requests: a number of seconds or
+            a ``(min, max)`` tuple for a randomized delay.
 
     Example:
         async with arequest.Session(impersonate="chrome", retries=3) as s:
@@ -200,6 +352,10 @@ class Session:
         rate_limit: float | None = None,
         rate_limit_per_host: float | None = None,
         rate_limit_burst: int = 1,
+        rate_limit_jitter: float = 0.0,
+        realistic_headers: bool = False,
+        user_agent_rotation: Any = None,
+        think_time: Any = None,
         hooks: Mapping[str, Any] | None = None,
         debug: bool = False,
         curl_options: Mapping[Any, Any] | None = None,
@@ -249,12 +405,28 @@ class Session:
         self.accept_encoding = accept_encoding
         self.retry_policy = RetryPolicy.from_value(retries, backoff_factor=backoff)
         self.hooks = dict(hooks or {})
+        if rate_limit_jitter < 0:
+            raise ValueError("rate_limit_jitter cannot be negative")
+        self._rate_limit_jitter = float(rate_limit_jitter)
         self._rate_limiter = (
-            AsyncRateLimiter(rate_limit, rate_limit_burst) if rate_limit is not None else None
+            AsyncRateLimiter(rate_limit, rate_limit_burst, jitter=self._rate_limit_jitter)
+            if rate_limit is not None
+            else None
         )
         self._per_host_rate = rate_limit_per_host
         self._rate_limit_burst = rate_limit_burst
         self._host_limiters: dict[tuple[str, str, int], AsyncRateLimiter] = {}
+        self._needs_limiting = bool(
+            self._rate_limiter is not None
+            or self._per_host_rate is not None
+            or self._global_semaphore is not None
+            or self._max_per_host
+        )
+        self.realistic_headers = bool(realistic_headers)
+        self._user_agent_rotation_source = user_agent_rotation
+        self.user_agent_rotation = _UserAgentRotator(user_agent_rotation, self.impersonate)
+        self.think_time = _normalize_think_time(think_time)
+        self._last_request_at: float | None = None
         cookie_jar = create_cookie_jar(cookies)
         self._transport = transport or CurlTransport(
             max_clients=max(1, connector_limit or 100),
@@ -318,7 +490,11 @@ class Session:
             key = self._origin_key(url)
             limiter = self._host_limiters.get(key)
             if limiter is None:
-                limiter = AsyncRateLimiter(self._per_host_rate, self._rate_limit_burst)
+                limiter = AsyncRateLimiter(
+                    self._per_host_rate,
+                    self._rate_limit_burst,
+                    jitter=self._rate_limit_jitter,
+                )
                 self._host_limiters[key] = limiter
             await limiter.acquire()
 
@@ -361,13 +537,46 @@ class Session:
 
         return release
 
+    async def _apply_think_time(self) -> None:
+        low, high = self.think_time or (0.0, 0.0)
+        delay = low if low == high else random.uniform(low, high)
+        now = time.monotonic()
+        last = self._last_request_at
+        self._last_request_at = now + max(delay, 0.0)
+        if last is None or delay <= 0:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            return
+        wait = (last + delay) - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    def _serialize_user_agent_rotation(self) -> Any:
+        source = self._user_agent_rotation_source
+        if source is None or isinstance(source, str | bool):
+            return source
+        try:
+            return list(source)
+        except TypeError:
+            return None
+
     def _resolve_url(self, url: str) -> str:
         if not isinstance(url, str) or not url.strip():
             raise InvalidURL("url must be a non-empty string")
+        if contains_control_characters(url):
+            raise InvalidURL("url contains control characters")
         resolved = urljoin(self.base_url.rstrip("/") + "/", url) if self.base_url else url
         parts = urlsplit(resolved)
         if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
-            raise InvalidURL(f"invalid HTTP URL: {resolved!r}")
+            raise InvalidURL(f"invalid HTTP URL: {strip_credentials(resolved)!r}")
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise InvalidURL(
+                f"URL has an invalid port: {strip_credentials(resolved)!r}"
+            ) from exc
+        if port is not None and not (1 <= port <= 65535):
+            raise InvalidURL(f"URL port out of range: {strip_credentials(resolved)!r}")
         return resolved
 
     async def request(
@@ -449,6 +658,28 @@ class Session:
         request_method = prepared.method.upper()
         request_url = self._resolve_url(prepared.url)
         request_headers = prepared.headers
+        request_impersonate = (
+            self.impersonate
+            if impersonate is _UNSET
+            else resolve_impersonate(impersonate)
+        )
+
+        # Layer in realistic browser headers / rotate UA without clobbering
+        # headers the caller set.
+        if self.realistic_headers or self.user_agent_rotation.enabled:
+            rotation_ua = self.user_agent_rotation.next()
+            merged_headers = Headers(request_headers)
+            if rotation_ua is not None and self.user_agent_rotation.enabled:
+                merged_headers["User-Agent"] = rotation_ua
+            if self.realistic_headers:
+                realistic = _build_realistic_headers(
+                    request_impersonate or self.impersonate,
+                    rotation_ua or merged_headers.get("User-Agent"),
+                )
+                for name, value in realistic.items():
+                    if name not in merged_headers:
+                        merged_headers[name] = value
+            request_headers = merged_headers
         request_timeout = self._timeout if timeout is _UNSET else normalize_timeout(timeout)
         request_verify = self.verify if verify is None else bool(verify)
         follow_redirects = self.allow_redirects if allow_redirects is None else allow_redirects
@@ -456,11 +687,6 @@ class Session:
         if redirect_limit < 0:
             raise ValueError("max_redirects cannot be negative")
         request_stream = self.stream if stream is None else bool(stream)
-        request_impersonate = (
-            self.impersonate
-            if impersonate is _UNSET
-            else resolve_impersonate(impersonate)
-        )
         request_ja3 = self.ja3 if ja3 is _UNSET else ja3
         request_akamai = self.akamai if akamai is _UNSET else akamai
         request_extra_fp = self.extra_fp if extra_fp is _UNSET else extra_fp
@@ -499,10 +725,18 @@ class Session:
         replayable = _body_is_replayable(data, files, multipart)
         retries_used = 0
 
+        if self.think_time is not None:
+            await self._apply_think_time()
+
+        needs_limiting = self._needs_limiting
+
         while True:
             prepared.attempt = retries_used + 1
-            await self._wait_for_rate_limit(request_url)
-            release = await self._acquire_slot(request_url)
+            if needs_limiting:
+                await self._wait_for_rate_limit(request_url)
+                release = await self._acquire_slot(request_url)
+            else:
+                release = _noop
             pool_proxy: str | None = None
             attempt_proxy = request_proxy
             if self._proxy_pool is not None and attempt_proxy is None and not request_proxies:
@@ -689,43 +923,69 @@ class Session:
         """
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be at least one")
-        semaphore = asyncio.Semaphore(max_concurrency)
-        pending = {
-            asyncio.ensure_future(self._bounded_fetch(semaphore, method, url, kwargs))
-            for url in urls
-        }
-        try:
-            while pending:
-                done, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in done:
-                    error = task.exception()
-                    if error is None:
-                        yield task.result()
-                    elif return_exceptions:
-                        yield error
-                    else:
-                        raise error
-        finally:
-            for task in pending:
-                task.cancel()
+        url_queue: asyncio.Queue[Any] = asyncio.Queue()
+        for url in urls:
+            url_queue.put_nowait(url)
+        result_queue: asyncio.Queue[Any] = asyncio.Queue()
+        _sentinel = object()
+        _error_marker = object()
 
-    async def _bounded_fetch(
-        self,
-        semaphore: asyncio.Semaphore,
-        method: str,
-        url: str,
-        kwargs: Mapping[str, Any],
-    ) -> Response:
-        async with semaphore:
-            return await self.request(method, url, **kwargs)
+        async def worker() -> None:
+            while True:
+                item = await url_queue.get()
+                if item is _sentinel:
+                    url_queue.task_done()
+                    return
+                try:
+                    response = await self.request(method, item, **kwargs)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - surfaced to consumer
+                    result_queue.put_nowait((_error_marker, exc))
+                else:
+                    result_queue.put_nowait((item, response))
+                finally:
+                    url_queue.task_done()
+
+        workers = [
+            asyncio.ensure_future(worker())
+            for _ in range(min(max_concurrency, url_queue.qsize()) or 1)
+        ]
+        # Push sentinels so workers exit once the URL queue is drained.
+        for _ in workers:
+            url_queue.put_nowait(_sentinel)
+
+        total = url_queue.qsize() - len(workers)  # URLs minus sentinels
+        outstanding = total
+        try:
+            while outstanding > 0:
+                kind, payload = await result_queue.get()
+                outstanding -= 1
+                if kind is _error_marker:
+                    if not return_exceptions:
+                        raise payload
+                    yield payload
+                else:
+                    yield payload
+        finally:
+            while not url_queue.empty():
+                try:
+                    url_queue.get_nowait()
+                    url_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+            for w in workers:
+                if not w.done():
+                    w.cancel()
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
 
     async def save(self, path: Union[str, "os.PathLike[str]"]) -> None:
         """Persist session state (cookies, headers, settings) to a JSON file.
 
         Auth handlers and hooks are not serialized. Proxy credentials are -
-        protect the resulting file accordingly.
+        protect the resulting file accordingly. The file is created with
+        owner-only permissions (``0600``) where the platform supports it.
         """
         limiter_rate = self._rate_limiter.rate if self._rate_limiter is not None else None
         retry = self.retry_policy
@@ -754,6 +1014,10 @@ class Session:
             "rate_limit": limiter_rate,
             "rate_limit_per_host": self._per_host_rate,
             "rate_limit_burst": self._rate_limit_burst,
+            "rate_limit_jitter": self._rate_limit_jitter,
+            "realistic_headers": self.realistic_headers,
+            "think_time": list(self.think_time) if self.think_time is not None else None,
+            "user_agent_rotation": self._serialize_user_agent_rotation(),
             "retries": {
                 "total": retry.total,
                 "backoff_factor": retry.backoff_factor,
@@ -764,7 +1028,10 @@ class Session:
                 "respect_retry_after_header": retry.respect_retry_after_header,
             },
         }
-        with open(path, "w", encoding="utf-8") as fh:
+        # Owner-only (0600) so cookies and proxy credentials stay private.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(os.fspath(path), flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=2)
 
     @classmethod
@@ -788,6 +1055,10 @@ class Session:
         if isinstance(timeout_value, list):
             timeout_value = tuple(timeout_value)
         rate_limit = state.get("rate_limit")
+        think_time = state.get("think_time")
+        if isinstance(think_time, list):
+            think_time = tuple(think_time)
+        ua_rotation = state.get("user_agent_rotation")
         return cls(
             headers=state.get("headers"),
             timeout=timeout_value,
@@ -811,6 +1082,10 @@ class Session:
             rate_limit=float(rate_limit) if rate_limit is not None else None,
             rate_limit_per_host=state.get("rate_limit_per_host"),
             rate_limit_burst=int(state.get("rate_limit_burst", 1)),
+            rate_limit_jitter=float(state.get("rate_limit_jitter", 0.0)),
+            realistic_headers=bool(state.get("realistic_headers", False)),
+            think_time=think_time,
+            user_agent_rotation=ua_rotation,
             retries=RetryPolicy(
                 total=retries_state.get("total", 0),
                 backoff_factor=retries_state.get("backoff_factor", 0.25),
@@ -868,9 +1143,19 @@ class Session:
             raise TypeError(f"unexpected arguments for ws_connect: {sorted(unknown)}")
 
         target = urljoin(self.base_url.rstrip("/") + "/", url) if self.base_url else url
+        if contains_control_characters(target):
+            raise InvalidURL("WebSocket URL contains control characters")
         parts = urlsplit(target)
         if parts.scheme.lower() not in ("ws", "wss") or not parts.hostname:
-            raise InvalidURL(f"invalid WebSocket URL: {target!r}")
+            raise InvalidURL(f"invalid WebSocket URL: {strip_credentials(target)!r}")
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise InvalidURL(
+                f"WebSocket URL has an invalid port: {strip_credentials(target)!r}"
+            ) from exc
+        if port is not None and not (1 <= port <= 65535):
+            raise InvalidURL(f"WebSocket URL port out of range: {strip_credentials(target)!r}")
 
         options = {key: value for key, value in kwargs.items() if key in self._WS_KWARGS}
         merged_headers = self._headers.copy()

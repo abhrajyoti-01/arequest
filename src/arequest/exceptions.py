@@ -1,4 +1,32 @@
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+try:
+    from curl_cffi.requests import exceptions as _curl_errors
+except ImportError:  # pragma: no cover - curl_cffi is a hard dependency
+    _curl_errors = None
+
+
+def strip_credentials(url: str | None) -> str | None:
+    """Mask ``user:password`` userinfo in a URL so it is safe to log.
+
+    Best-effort: if the URL cannot be parsed, it is returned unchanged.
+    """
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        if parts.username is None and parts.password is None:
+            return url
+        netloc = parts.netloc.rsplit("@", 1)[-1]
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except ValueError:
+        return url
+
+
+def contains_control_characters(url: str) -> bool:
+    """Return True if the URL contains characters that must not appear in one."""
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in url)
 
 
 class RequestError(Exception):
@@ -82,14 +110,13 @@ def translate_exception(exc: BaseException, url: str | None = None) -> RequestEr
     if isinstance(exc, RequestError):
         return exc
 
-    try:
-        from curl_cffi.requests import exceptions as curl_errors
-    except ImportError:
+    curl_errors = _curl_errors
+    if curl_errors is None:
         return TransportError(str(exc) or exc.__class__.__name__)
 
     response = getattr(exc, "response", None)
     request = getattr(response, "request", None)
-    target = f" for {url}" if url else ""
+    target = f" for {strip_credentials(url)}" if url else ""
     message = f"{exc}{target}"
 
     if isinstance(exc, curl_errors.ImpersonateError):

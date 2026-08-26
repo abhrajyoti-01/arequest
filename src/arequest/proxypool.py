@@ -3,7 +3,7 @@ import time
 from collections.abc import Iterable
 from urllib.parse import urlsplit
 
-from .exceptions import ProxyError
+from .exceptions import ProxyError, strip_credentials
 
 _STRATEGIES = frozenset(("round_robin", "random", "failover"))
 
@@ -102,9 +102,16 @@ class ProxyPool:
         state.failed_until = 0.0
 
     def status(self) -> dict[str, bool]:
-        """Map each proxy URL to whether it is currently healthy."""
+        """Map each proxy URL to whether it is currently healthy.
+
+        URLs are returned with any ``user:password`` userinfo masked so the
+        result is safe to log.
+        """
         now = time.monotonic()
-        return {state.url: state.failed_until <= now for state in self._states}
+        return {
+            strip_credentials(state.url): state.failed_until <= now
+            for state in self._states
+        }
 
     def __len__(self) -> int:
         return len(self._states)

@@ -4,7 +4,13 @@ from urllib.parse import urljoin, urlsplit
 
 from curl_cffi.requests import AsyncSession, Cookies, Headers
 
-from .exceptions import InvalidURL, TooManyRedirects, translate_exception
+from .exceptions import (
+    InvalidURL,
+    TooManyRedirects,
+    contains_control_characters,
+    strip_credentials,
+    translate_exception,
+)
 
 _HTTP_VERSIONS = {
     "auto": None,
@@ -44,7 +50,11 @@ def normalize_http_version(value: Any) -> Any:
 
 def _origin(url: str) -> tuple:
     parts = urlsplit(url)
-    port = parts.port or (443 if parts.scheme.lower() == "https" else 80)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    port = port or (443 if parts.scheme.lower() == "https" else 80)
     return parts.scheme.lower(), (parts.hostname or "").lower(), port
 
 
@@ -136,16 +146,28 @@ class CurlTransport:
             if len(history) >= max_redirects:
                 await self._discard_stream(response)
                 raise TooManyRedirects(
-                    f"Exceeded {max_redirects} redirects for {url}",
+                    f"Exceeded {max_redirects} redirects for {strip_credentials(url)}",
                     request=getattr(response, "request", None),
                     response=response,
                 )
 
             next_url = urljoin(current_url, location)
+            if contains_control_characters(next_url):
+                await self._discard_stream(response)
+                raise InvalidURL("redirect URL contains control characters")
             parts = urlsplit(next_url)
             if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
                 await self._discard_stream(response)
-                raise InvalidURL(f"invalid redirect URL: {next_url!r}")
+                raise InvalidURL(f"invalid redirect URL: {strip_credentials(next_url)!r}")
+            try:
+                port = parts.port
+            except ValueError:
+                port = -1
+            if port is not None and not (1 <= port <= 65535):
+                await self._discard_stream(response)
+                raise InvalidURL(
+                    f"redirect URL has an out-of-range port: {strip_credentials(next_url)!r}"
+                )
 
             history.append(response)
             await self._discard_stream(response)
@@ -155,20 +177,23 @@ class CurlTransport:
             elif response.status_code in (301, 302) and current_method == "POST":
                 next_method = "GET"
 
-            request_headers = Headers(options.get("headers"))
-            if _origin(current_url) != _origin(next_url):
-                for name in ("Authorization", "Cookie", "Host", "Proxy-Authorization"):
-                    request_headers.pop(name, None)
-                options["auth"] = None
-                options["cookies"] = None
-            if next_method != current_method:
-                for name in ("Content-Length", "Content-Type", "Transfer-Encoding", "Origin"):
-                    request_headers.pop(name, None)
-                options["data"] = None
-                options["json"] = None
-                options["files"] = None
-                options["multipart"] = None
-            options["headers"] = request_headers
+            cross_origin = _origin(current_url) != _origin(next_url)
+            method_changed = next_method != current_method
+            if cross_origin or method_changed:
+                request_headers = Headers(options.get("headers"))
+                if cross_origin:
+                    for name in ("Authorization", "Cookie", "Host", "Proxy-Authorization"):
+                        request_headers.pop(name, None)
+                    options["auth"] = None
+                    options["cookies"] = None
+                if method_changed:
+                    for name in ("Content-Length", "Content-Type", "Transfer-Encoding", "Origin"):
+                        request_headers.pop(name, None)
+                    options["data"] = None
+                    options["json"] = None
+                    options["files"] = None
+                    options["multipart"] = None
+                options["headers"] = request_headers
             current_method = next_method
             current_url = next_url
 

@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import codecs
 import inspect
 import json as stdlib_json
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -81,11 +83,11 @@ class Response:
         elapsed = getattr(raw, "elapsed", 0.0)
         self.elapsed = elapsed.total_seconds() if hasattr(elapsed, "total_seconds") else float(elapsed)
         self.cookies = getattr(raw, "cookies", {})
-        self.history = [Response(item) for item in getattr(raw, "history", ())]
+        self._history: list[Response] | None = None
         self.request_info = request or self._request_from_raw(raw)
         self.request = self.request_info
         self.attempts = attempts
-        self.redirect_count = int(getattr(raw, "redirect_count", len(self.history)))
+        self._redirect_count = getattr(raw, "redirect_count", None)
         self.redirect_url = str(getattr(raw, "redirect_url", ""))
         self.http_version = getattr(raw, "http_version", None)
         self.primary_ip = str(getattr(raw, "primary_ip", ""))
@@ -99,6 +101,29 @@ class Response:
         self._stream_started = False
         self._stream_consumed = False
         self._encoding: str | None = None
+
+    @property
+    def history(self) -> list[Response]:
+        if self._history is None:
+            self._history = [Response(item) for item in getattr(self.raw, "history", ())]
+        return self._history
+
+    @history.setter
+    def history(self, value: Iterable[Response]) -> None:
+        self._history = list(value)
+
+    @property
+    def redirect_count(self) -> int:
+        if self._redirect_count is not None:
+            try:
+                return int(self._redirect_count)
+            except (TypeError, ValueError):
+                pass
+        return len(self.history)
+
+    @redirect_count.setter
+    def redirect_count(self, value: Any) -> None:
+        self._redirect_count = value
 
     @staticmethod
     def _request_from_raw(raw: Any) -> PreparedRequest | None:
@@ -334,7 +359,7 @@ class Response:
                 raise RuntimeError("use await response.aclose() to close this response")
             self._released = True
 
-    async def __aenter__(self) -> "Response":
+    async def __aenter__(self) -> Response:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
